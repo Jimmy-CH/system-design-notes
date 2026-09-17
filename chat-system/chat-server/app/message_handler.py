@@ -1,4 +1,5 @@
 import json
+import logging
 import time
 
 import redis.asyncio as redis
@@ -7,6 +8,9 @@ from sqlalchemy import text
 
 from app.config import settings
 from app.snowflake import generator
+from app.connection_manager import GLOBAL_CHANNEL
+
+logger = logging.getLogger(__name__)
 
 # Database setup for chat server
 engine = create_async_engine(settings.DATABASE_URL, echo=False)
@@ -23,6 +27,12 @@ async def handle_send_message(sender_id: str, receiver_id: str, content: str, ch
     msg_id = str(generator.generate())
     timestamp = int(time.time())
 
+    # Compute channel_id
+    if channel_type == "one_to_one":
+        channel_id = "_".join(sorted([sender_id, receiver_id]))
+    else:
+        channel_id = receiver_id  # group_id
+
     message = {
         "message_id": msg_id,
         "sender_id": sender_id,
@@ -33,8 +43,28 @@ async def handle_send_message(sender_id: str, receiver_id: str, content: str, ch
         "channel_type": channel_type,
     }
 
-    # Store message in KV store
+    # Store message in Redis KV store
     await r.set(f"message:{msg_id}", json.dumps(message))
+
+    # Persist to PostgreSQL (best-effort)
+    try:
+        async with async_session() as db:
+            await db.execute(
+                text(
+                    "INSERT INTO messages (id, sender_id, channel_type, channel_id, content) "
+                    "VALUES (:id, :sender_id, :channel_type, :channel_id, :content)"
+                ),
+                {
+                    "id": int(msg_id),
+                    "sender_id": sender_id,
+                    "channel_type": channel_type,
+                    "channel_id": channel_id,
+                    "content": content,
+                },
+            )
+            await db.commit()
+    except Exception:
+        logger.exception(f"Failed to persist message {msg_id} to PostgreSQL")
 
     if channel_type == "one_to_one":
         await _handle_one_to_one(r, sender_id, receiver_id, message)
@@ -61,20 +91,14 @@ async def _handle_one_to_one(r: redis.Redis, sender_id: str, receiver_id: str, m
         {message["message_id"]: int(message["message_id"])},
     )
 
-    # Check if receiver is online
-    presence = await r.hgetall(f"presence:{receiver_id}")
-    if presence and presence.get("status") == "online":
-        # Publish to receiver's channel
-        await r.publish(f"channel:{receiver_id}", json.dumps({
-            "type": "new_message",
-            "message": message,
-        }))
-    else:
-        # Queue offline notification
-        await r.publish("notification:offline", json.dumps({
-            "user_id": receiver_id,
-            "message": message,
-        }))
+    # Publish to global channel with receiver as target
+    payload = {
+        "type": "new_message",
+        "message": message,
+        "target_user_ids": [receiver_id],
+    }
+    await r.publish(GLOBAL_CHANNEL, json.dumps(payload))
+    logger.info(f"Message {message['message_id']} delivered to global channel for user {receiver_id}")
 
 
 async def _handle_group_message(r: redis.Redis, sender_id: str, group_id: str, message: dict):
@@ -105,14 +129,15 @@ async def _handle_group_message(r: redis.Redis, sender_id: str, group_id: str, m
                     "message": message,
                 }))
 
-    # Broadcast to online members via Pub/Sub
+    # Broadcast to online members via global Pub/Sub channel
     if target_user_ids:
         payload = {
             "type": "new_message",
             "message": message,
             "target_user_ids": target_user_ids,
         }
-        await r.publish(f"channel:group:{group_id}", json.dumps(payload))
+        await r.publish(GLOBAL_CHANNEL, json.dumps(payload))
+        logger.info(f"Group message {message['message_id']} delivered for group {group_id} to {len(target_user_ids)} users")
 
 
 async def handle_sync(user_id: str, channel_id: str, last_message_id: str):
