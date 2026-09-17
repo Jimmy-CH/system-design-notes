@@ -249,6 +249,81 @@ async def list_members_with_status(
     return responses
 
 
+@router.post("/{group_id}/invite", response_model=GroupInviteResponse)
+async def invite_friends_to_group(
+    group_id: str,
+    data: GroupInviteRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Invite friends to join a group. Any member can invite."""
+    gid = uuid.UUID(group_id)
+
+    # Verify current user is a member
+    result = await db.execute(
+        select(GroupMember).where(
+            GroupMember.group_id == gid,
+            GroupMember.user_id == current_user.id,
+        )
+    )
+    if not result.scalar_one_or_none():
+        raise HTTPException(status_code=403, detail="Not a member of this group")
+
+    # Verify each friend_id is actually a friend
+    friend_result = await db.execute(
+        select(Friendship.friend_id).where(
+            Friendship.user_id == current_user.id,
+            Friendship.status == "accepted",
+        )
+    )
+    friend_ids = set(str(fid) for fid in friend_result.scalars().all())
+
+    invited_ids = []
+    for fid in data.friend_ids:
+        fid_str = str(fid)
+        if fid_str not in friend_ids:
+            continue
+
+        # Check if already a member
+        member_result = await db.execute(
+            select(GroupMember).where(
+                GroupMember.group_id == gid,
+                GroupMember.user_id == fid,
+            )
+        )
+        if member_result.scalar_one_or_none():
+            continue
+
+        new_member = GroupMember(group_id=gid, user_id=fid, role="member")
+        db.add(new_member)
+        invited_ids.append(fid_str)
+
+    await db.commit()
+
+    # Publish invite notifications via Redis Pub/Sub
+    if invited_ids:
+        r = await get_redis()
+        group_result = await db.execute(select(Group).where(Group.id == gid))
+        group = group_result.scalar_one()
+
+        for uid in invited_ids:
+            payload = {
+                "type": "group_invite",
+                "target_user_ids": [uid],
+                "group_id": str(gid),
+                "group_name": group.name,
+                "inviter_id": str(current_user.id),
+            }
+            await r.publish("chat:messages", json.dumps(payload))
+
+        await r.aclose()
+
+    return GroupInviteResponse(
+        invited_ids=invited_ids,
+        message=f"Invited {len(invited_ids)} friend(s) to group",
+    )
+
+
 @router.get("/{group_id}/messages", response_model=list[MessageResponse])
 async def get_group_messages(
     group_id: str,
