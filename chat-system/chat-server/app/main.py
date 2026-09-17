@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket
@@ -6,11 +7,16 @@ from jose import jwt
 
 from app.config import settings
 from app.connection_manager import manager
-from app.message_handler import handle_send_message, handle_sync
+from app.message_handler import handle_send_message, handle_sync, recover_messages_from_db
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Recover messages from PostgreSQL to Redis
+    await recover_messages_from_db()
     # Start Pub/Sub listener
     task = asyncio.create_task(manager.listen_pubsub())
     yield
@@ -44,6 +50,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             msg_type = data.get("type")
 
             if msg_type == "send_message":
+                logger.info(f"User {user_id} sending message to {data['receiver_id']}, type={data.get('channel_type', 'one_to_one')}")
                 message = await handle_send_message(
                     sender_id=user_id,
                     receiver_id=data["receiver_id"],
@@ -55,6 +62,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     "type": "new_message",
                     "message": message,
                 })
+                logger.info(f"Message {message['message_id']} sent and confirmation delivered to {user_id}")
 
             elif msg_type == "sync":
                 messages = await handle_sync(
@@ -75,7 +83,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         "user_id": user_id,
                     })
 
-    except Exception:
+    except Exception as e:
+        logger.exception(f"WebSocket error for user {user_id}: {e}")
         manager.disconnect(user_id)
         await manager.cleanup(user_id)
 

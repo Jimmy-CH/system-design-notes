@@ -157,3 +157,70 @@ async def handle_sync(user_id: str, channel_id: str, last_message_id: str):
 
     await r.aclose()
     return messages
+
+
+async def recover_messages_from_db():
+    """Recover recent messages from PostgreSQL to Redis on startup."""
+    r = await get_redis()
+    try:
+        async with async_session() as db:
+            # Get distinct channels
+            result = await db.execute(
+                text("SELECT DISTINCT channel_id FROM messages")
+            )
+            channels = [row[0] for row in result.fetchall()]
+
+            total = 0
+            for channel_id in channels:
+                # Get recent 100 messages per channel
+                result = await db.execute(
+                    text(
+                        "SELECT id, sender_id, channel_type, channel_id, content, created_at "
+                        "FROM messages WHERE channel_id = :cid "
+                        "ORDER BY id DESC LIMIT 100"
+                    ),
+                    {"cid": channel_id},
+                )
+                rows = result.fetchall()
+
+                for row in rows:
+                    msg_id = str(row[0])
+                    message = {
+                        "message_id": msg_id,
+                        "sender_id": str(row[1]),
+                        "receiver_id": "",
+                        "content": row[4],
+                        "type": "text",
+                        "timestamp": int(row[5].timestamp()) if row[5] else 0,
+                        "channel_type": row[2],
+                    }
+
+                    # Backfill Redis KV
+                    await r.set(f"message:{msg_id}", json.dumps(message))
+
+                    if row[2] == "one_to_one":
+                        parts = row[3].split("_")
+                        if len(parts) == 2:
+                            for uid in parts:
+                                await r.zadd(
+                                    f"inbox:{uid}:{row[3]}",
+                                    {msg_id: int(msg_id)},
+                                )
+                    else:
+                        members_result = await db.execute(
+                            text("SELECT user_id FROM group_members WHERE group_id = :gid"),
+                            {"gid": row[3]},
+                        )
+                        for member_row in members_result.fetchall():
+                            await r.zadd(
+                                f"inbox:{str(member_row[0])}:{row[3]}",
+                                {msg_id: int(msg_id)},
+                            )
+
+                total += len(rows)
+
+            logger.info(f"Recovered {total} messages from PostgreSQL to Redis across {len(channels)} channels")
+    except Exception:
+        logger.exception("Failed to recover messages from PostgreSQL")
+    finally:
+        await r.aclose()
