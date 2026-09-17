@@ -9,7 +9,7 @@ from app.config import settings
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.models import User, Friendship
-from app.schemas import FriendResponse
+from app.schemas import FriendResponse, PendingRequestResponse
 
 router = APIRouter(prefix="/api/friends", tags=["friends"])
 
@@ -55,6 +55,74 @@ async def send_friend_request(
     return {"message": "Friend request sent"}
 
 
+@router.get("/pending-requests", response_model=list[PendingRequestResponse])
+async def list_pending_requests(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get all pending friend requests received by the current user."""
+    result = await db.execute(
+        select(Friendship).where(
+            Friendship.friend_id == current_user.id,
+            Friendship.status == "pending",
+        )
+    )
+    requests = result.scalars().all()
+    requester_ids = [r.user_id for r in requests]
+
+    if not requester_ids:
+        return []
+
+    result = await db.execute(select(User).where(User.id.in_(requester_ids)))
+    users = {u.id: u for u in result.scalars().all()}
+
+    return [
+        PendingRequestResponse(
+            user_id=req.user_id,
+            username=users[req.user_id].username,
+            nickname=users[req.user_id].nickname,
+            avatar_url=users[req.user_id].avatar_url,
+            created_at=req.created_at,
+        )
+        for req in requests
+        if req.user_id in users
+    ]
+
+
+@router.get("/sent-requests", response_model=list[PendingRequestResponse])
+async def list_sent_requests(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get all friend requests sent by the current user."""
+    result = await db.execute(
+        select(Friendship).where(
+            Friendship.user_id == current_user.id,
+            Friendship.status == "pending",
+        )
+    )
+    requests = result.scalars().all()
+    target_ids = [r.friend_id for r in requests]
+
+    if not target_ids:
+        return []
+
+    result = await db.execute(select(User).where(User.id.in_(target_ids)))
+    users = {u.id: u for u in result.scalars().all()}
+
+    return [
+        PendingRequestResponse(
+            user_id=req.friend_id,
+            username=users[req.friend_id].username,
+            nickname=users[req.friend_id].nickname,
+            avatar_url=users[req.friend_id].avatar_url,
+            created_at=req.created_at,
+        )
+        for req in requests
+        if req.friend_id in users
+    ]
+
+
 @router.put("/{friend_id}/accept")
 async def accept_friend_request(
     friend_id: str,
@@ -81,6 +149,54 @@ async def accept_friend_request(
     db.add(reverse)
     await db.commit()
     return {"message": "Friend request accepted"}
+
+
+@router.put("/{friend_id}/reject")
+async def reject_friend_request(
+    friend_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    fid = uuid.UUID(friend_id)
+
+    result = await db.execute(
+        select(Friendship).where(
+            Friendship.user_id == fid,
+            Friendship.friend_id == current_user.id,
+            Friendship.status == "pending",
+        )
+    )
+    friendship = result.scalar_one_or_none()
+    if not friendship:
+        raise HTTPException(status_code=404, detail="Friend request not found")
+
+    await db.delete(friendship)
+    await db.commit()
+    return {"message": "Friend request rejected"}
+
+
+@router.delete("/{friend_id}/cancel")
+async def cancel_friend_request(
+    friend_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    fid = uuid.UUID(friend_id)
+
+    result = await db.execute(
+        select(Friendship).where(
+            Friendship.user_id == current_user.id,
+            Friendship.friend_id == fid,
+            Friendship.status == "pending",
+        )
+    )
+    friendship = result.scalar_one_or_none()
+    if not friendship:
+        raise HTTPException(status_code=404, detail="Friend request not found")
+
+    await db.delete(friendship)
+    await db.commit()
+    return {"message": "Friend request cancelled"}
 
 
 @router.delete("/{friend_id}")

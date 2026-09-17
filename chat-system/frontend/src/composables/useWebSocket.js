@@ -20,26 +20,22 @@ export function useWebSocket(token) {
       console.log('WebSocket connected')
     }
 
-    ws.value.onmessage = (event) => {
+    ws.value.onmessage = async (event) => {
       const data = JSON.parse(event.data)
 
       if (data.type === 'new_message') {
         const msg = data.message
-        const currentUserId = getCurrentUserId()
-        const channelId = msg.channel_type === 'group'
-          ? msg.receiver_id
-          : msg.sender_id === currentUserId ? msg.receiver_id : msg.sender_id
+        const channelId = getChannelId(msg)
         chatStore.addMessage(channelId, msg)
       } else if (data.type === 'message_sync') {
         data.messages.forEach(msg => {
-          const currentUserId = getCurrentUserId()
-          const channelId = msg.channel_type === 'group'
-            ? msg.receiver_id
-            : msg.sender_id === currentUserId ? msg.receiver_id : msg.sender_id
+          const channelId = getChannelId(msg)
           chatStore.addMessage(channelId, msg)
         })
       } else if (data.type === 'presence_update') {
         chatStore.updateOnlineStatus(data.user_id, data.status)
+      } else if (data.type === 'group_invite') {
+        await chatStore.fetchGroups()
       } else if (data.type === 'error') {
         console.error('WebSocket error:', data.message)
       }
@@ -92,6 +88,14 @@ export function useWebSocket(token) {
       ws.value.close()
       ws.value = null
     }
+  }
+
+  function getChannelId(msg) {
+    if (msg.channel_type === 'group') {
+      return msg.receiver_id
+    }
+    const ids = [msg.sender_id, msg.receiver_id].sort()
+    return ids.join('_')
   }
 
   function getCurrentUserId() {

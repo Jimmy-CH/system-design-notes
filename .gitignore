@@ -4,6 +4,10 @@ web-crawler/crawler_data.db
 crawled_pages/
 crawler_data.db
 
+# Notification System generated files
+notification_system.db
+notification-system/notification_system.db
+
 # Python
 __pycache__/
 *.pyc

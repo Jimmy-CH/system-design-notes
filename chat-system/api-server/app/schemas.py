@@ -61,6 +61,14 @@ class FriendResponse(BaseModel):
     online_status: str = "offline"
 
 
+class PendingRequestResponse(BaseModel):
+    user_id: uuid.UUID
+    username: str
+    nickname: str | None
+    avatar_url: str | None
+    created_at: datetime
+
+
 # --- Group ---
 class GroupCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
@@ -100,3 +108,24 @@ class MessageResponse(BaseModel):
     type: str = "text"
     timestamp: int
     channel_type: str
+
+
+# --- Group Member with Status ---
+class GroupMemberStatusResponse(BaseModel):
+    user_id: uuid.UUID
+    username: str
+    nickname: str | None
+    avatar_url: str | None
+    role: str
+    online_status: str = "offline"
+    is_friend: bool = False
+
+
+# --- Group Invite ---
+class GroupInviteRequest(BaseModel):
+    friend_ids: list[uuid.UUID]
+
+
+class GroupInviteResponse(BaseModel):
+    invited_ids: list[uuid.UUID]
+    message: str

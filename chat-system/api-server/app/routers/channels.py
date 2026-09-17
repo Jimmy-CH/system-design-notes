@@ -2,10 +2,13 @@ import json
 
 import redis.asyncio as redis
 from fastapi import APIRouter, Depends
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.database import get_db
 from app.dependencies import get_current_user
-from app.models import User
+from app.models import User, Message
 from app.schemas import MessageResponse
 
 router = APIRouter(prefix="/api/channels", tags=["channels"])
@@ -19,6 +22,7 @@ async def get_redis() -> redis.Redis:
 async def get_channel_messages(
     user_id: str,
     current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
     limit: int = 50,
     before: str | None = None,
 ):
@@ -40,4 +44,46 @@ async def get_channel_messages(
             messages.append(MessageResponse(**json.loads(msg_data)))
 
     await r.aclose()
+
+    # Fallback to PostgreSQL if Redis is empty
+    if not messages:
+        query = select(Message).where(Message.channel_id == channel_id)
+        if before:
+            query = query.where(Message.id < int(before))
+        query = query.order_by(Message.id.desc()).limit(limit)
+
+        result = await db.execute(query)
+        db_messages = result.scalars().all()
+
+        for msg in reversed(db_messages):
+            messages.append(MessageResponse(
+                message_id=str(msg.id),
+                sender_id=str(msg.sender_id),
+                receiver_id=user_id,
+                content=msg.content,
+                type="text",
+                timestamp=int(msg.created_at.timestamp()),
+                channel_type=msg.channel_type,
+            ))
+
+        # Backfill Redis cache
+        if db_messages:
+            r = await get_redis()
+            for msg in db_messages:
+                msg_dict = {
+                    "message_id": str(msg.id),
+                    "sender_id": str(msg.sender_id),
+                    "receiver_id": user_id,
+                    "content": msg.content,
+                    "type": "text",
+                    "timestamp": int(msg.created_at.timestamp()),
+                    "channel_type": msg.channel_type,
+                }
+                await r.set(f"message:{msg.id}", json.dumps(msg_dict))
+                await r.zadd(inbox_key, {str(msg.id): msg.id})
+                # Also add to peer's inbox
+                peer_inbox_key = f"inbox:{user_id}:{channel_id}"
+                await r.zadd(peer_inbox_key, {str(msg.id): msg.id})
+            await r.aclose()
+
     return messages
