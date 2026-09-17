@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database import get_db
 from app.dependencies import get_current_user
-from app.models import User, Group, GroupMember
+from app.models import User, Group, GroupMember, Message
 from app.schemas import (
     GroupCreate, GroupResponse, GroupMemberAdd, GroupMemberResponse, MessageResponse,
 )
@@ -232,4 +232,43 @@ async def get_group_messages(
             messages.append(MessageResponse(**json.loads(msg_data)))
 
     await r.aclose()
+
+    # Fallback to PostgreSQL if Redis is empty
+    if not messages:
+        query = select(Message).where(Message.channel_id == group_id)
+        if before:
+            query = query.where(Message.id < int(before))
+        query = query.order_by(Message.id.desc()).limit(limit)
+
+        result = await db.execute(query)
+        db_messages = result.scalars().all()
+
+        for msg in reversed(db_messages):
+            messages.append(MessageResponse(
+                message_id=str(msg.id),
+                sender_id=str(msg.sender_id),
+                receiver_id=group_id,
+                content=msg.content,
+                type="text",
+                timestamp=int(msg.created_at.timestamp()),
+                channel_type=msg.channel_type,
+            ))
+
+        # Backfill Redis cache
+        if db_messages:
+            r = await get_redis()
+            for msg in db_messages:
+                msg_dict = {
+                    "message_id": str(msg.id),
+                    "sender_id": str(msg.sender_id),
+                    "receiver_id": group_id,
+                    "content": msg.content,
+                    "type": "text",
+                    "timestamp": int(msg.created_at.timestamp()),
+                    "channel_type": msg.channel_type,
+                }
+                await r.set(f"message:{msg.id}", json.dumps(msg_dict))
+                await r.zadd(inbox_key, {str(msg.id): msg.id})
+            await r.aclose()
+
     return messages
