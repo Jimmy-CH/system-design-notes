@@ -9,9 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database import get_db
 from app.dependencies import get_current_user
-from app.models import User, Group, GroupMember, Message
+from app.models import User, Group, GroupMember, Message, Friendship
 from app.schemas import (
     GroupCreate, GroupResponse, GroupMemberAdd, GroupMemberResponse, MessageResponse,
+    GroupMemberStatusResponse, GroupInviteRequest, GroupInviteResponse,
 )
 
 router = APIRouter(prefix="/api/groups", tags=["groups"])
@@ -198,6 +199,54 @@ async def list_members(
         GroupMemberResponse(user_id=user.id, username=user.username, nickname=user.nickname, role=role)
         for user, role in rows
     ]
+
+
+@router.get("/{group_id}/members-with-status", response_model=list[GroupMemberStatusResponse])
+async def list_members_with_status(
+    group_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get group members with online status and friendship info."""
+    gid = uuid.UUID(group_id)
+
+    # Get all members
+    result = await db.execute(
+        select(User, GroupMember.role)
+        .join(GroupMember, User.id == GroupMember.user_id)
+        .where(GroupMember.group_id == gid)
+    )
+    rows = result.all()
+
+    # Get current user's friends
+    friend_result = await db.execute(
+        select(Friendship.friend_id).where(
+            Friendship.user_id == current_user.id,
+            Friendship.status == "accepted",
+        )
+    )
+    friend_ids = set(str(fid) for fid in friend_result.scalars().all())
+
+    # Get online statuses from Redis
+    r = await get_redis()
+    responses = []
+    for user, role in rows:
+        presence = await r.hgetall(f"presence:{user.id}")
+        online_status = presence.get("status", "offline") if presence else "offline"
+        responses.append(
+            GroupMemberStatusResponse(
+                user_id=user.id,
+                username=user.username,
+                nickname=user.nickname,
+                avatar_url=user.avatar_url,
+                role=role,
+                online_status=online_status,
+                is_friend=str(user.id) in friend_ids,
+            )
+        )
+
+    await r.aclose()
+    return responses
 
 
 @router.get("/{group_id}/messages", response_model=list[MessageResponse])
