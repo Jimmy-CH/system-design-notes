@@ -1,4 +1,5 @@
 import json
+import logging
 import time
 from typing import Dict
 
@@ -6,6 +7,11 @@ from fastapi import WebSocket
 import redis.asyncio as redis
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
+
+# Single global Pub/Sub channel for all message routing
+GLOBAL_CHANNEL = "chat:messages"
 
 
 class ConnectionManager:
@@ -20,8 +26,9 @@ class ConnectionManager:
     async def connect(self, user_id: str, websocket: WebSocket):
         await websocket.accept()
         self.active_connections[user_id] = websocket
+        logger.info(f"User connected: {user_id}, total: {len(self.active_connections)}")
 
-        # Register in Redis
+        # Register presence in Redis
         r = await self._get_redis()
         await r.set(f"user_server:{user_id}", settings.SERVICE_NAME)
         await r.hset(f"presence:{user_id}", mapping={
@@ -29,20 +36,14 @@ class ConnectionManager:
             "last_heartbeat": str(int(time.time())),
         })
 
-        # Subscribe to personal channel
-        await self.pubsub.subscribe(f"channel:{user_id}")
-
     def disconnect(self, user_id: str):
         self.active_connections.pop(user_id, None)
+        logger.info(f"User disconnected: {user_id}, total: {len(self.active_connections)}")
 
     async def cleanup(self, user_id: str):
         r = await self._get_redis()
         await r.delete(f"user_server:{user_id}")
         await r.hset(f"presence:{user_id}", mapping={"status": "offline"})
-        try:
-            await self.pubsub.unsubscribe(f"channel:{user_id}")
-        except Exception:
-            pass
 
     async def send_personal(self, user_id: str, data: dict):
         ws = self.active_connections.get(user_id)
@@ -50,31 +51,35 @@ class ConnectionManager:
             await ws.send_json(data)
 
     async def listen_pubsub(self):
-        """Listen for messages from Redis Pub/Sub and forward to WebSocket clients."""
-        try:
-            async for message in self.pubsub.listen():
-                if message["type"] == "message":
-                    channel = message["channel"]
-                    if isinstance(channel, bytes):
-                        channel = channel.decode()
-                    data = json.loads(message["data"])
+        """Listen for messages from Redis Pub/Sub global channel and forward to WebSocket clients."""
+        while True:
+            try:
+                r = await self._get_redis()
+                if self.pubsub is None:
+                    self.pubsub = r.pubsub()
+                    await self.pubsub.subscribe(GLOBAL_CHANNEL)
+                    logger.info(f"Subscribed to global channel: {GLOBAL_CHANNEL}")
 
-                    # Route message to the right user(s)
-                    if channel.startswith("channel:group:"):
-                        # Forward to all connected users in this group
+                async for message in self.pubsub.listen():
+                    if message["type"] != "message":
+                        continue
+                    try:
+                        data = json.loads(message["data"])
+                        # Route to target users
                         target_ids = data.pop("target_user_ids", [])
                         for uid in target_ids:
                             await self.send_personal(uid, data)
-                    elif channel.startswith("channel:"):
-                        user_id = channel.split("channel:")[1]
-                        await self.send_personal(user_id, data)
-        except Exception:
-            pass  # Connection closed
+                    except Exception:
+                        logger.exception("Error processing Pub/Sub message")
+            except Exception:
+                logger.exception("Pub/Sub listener error, reconnecting in 2s...")
+                self.pubsub = None
+                import asyncio
+                await asyncio.sleep(2)
 
     async def _get_redis(self) -> redis.Redis:
         if self.redis is None:
             self.redis = redis.from_url(settings.REDIS_URL, decode_responses=True)
-            self.pubsub = self.redis.pubsub()
         return self.redis
 
 
