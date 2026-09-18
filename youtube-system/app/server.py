@@ -14,6 +14,7 @@ from app.auth import service as auth_service
 from app.auth import dependencies as auth_deps
 from app.auth.dependencies import CurrentUser, get_current_user, require_role
 from app.auth.router import router as auth_router
+from app.comments.router import router as comments_router
 from app.completion_consumer import run_consumer
 from app.config import config
 from app.models import UploadUrlRequest, UploadUrlResponse, VideoCreateRequest
@@ -52,6 +53,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="YouTube Video Streaming System", lifespan=lifespan)
 app.include_router(auth_router)
+app.include_router(comments_router)
 
 
 def _card(v: dict) -> dict:
