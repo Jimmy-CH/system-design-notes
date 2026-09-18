@@ -53,6 +53,34 @@ async def init_db() -> None:
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS comments (
+                id            TEXT PRIMARY KEY,
+                video_id      TEXT NOT NULL REFERENCES videos(id),
+                author_id     TEXT NOT NULL REFERENCES users(id),
+                parent_id     TEXT REFERENCES comments(id),
+                root_id       TEXT REFERENCES comments(id),
+                body          TEXT NOT NULL,
+                status        TEXT NOT NULL DEFAULT 'active',
+                like_count    INTEGER NOT NULL DEFAULT 0,
+                dislike_count INTEGER NOT NULL DEFAULT 0,
+                score         INTEGER NOT NULL DEFAULT 0,
+                created_at    REAL NOT NULL,
+                updated_at    REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_comments_thread
+                ON comments(root_id, status);
+            CREATE INDEX IF NOT EXISTS idx_comments_sort
+                ON comments(video_id, status, score, created_at);
+            CREATE TABLE IF NOT EXISTS comment_votes (
+                user_id    TEXT NOT NULL REFERENCES users(id),
+                comment_id TEXT NOT NULL REFERENCES comments(id),
+                value      INTEGER NOT NULL,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY (user_id, comment_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_votes_comment
+                ON comment_votes(comment_id);
         """)
         # videos.uploader_id is nullable: rows created before the user system
         # stay anonymous. SQLite has no ADD COLUMN IF NOT EXISTS, so probe first.
@@ -260,3 +288,176 @@ async def set_user_status(user_id: str, status: str) -> None:
             (status, time.time(), user_id),
         )
         await db.commit()
+
+
+_COMMENT_SELECT = """
+    SELECT c.*, u.username AS author_username
+    FROM comments c LEFT JOIN users u ON c.author_id = u.id
+"""
+
+
+async def insert_comment(comment_id: str, video_id: str, author_id: str,
+                         body: str, parent_id: str | None,
+                         root_id: str | None) -> None:
+    now = time.time()
+    async with aiosqlite.connect(config.db_path) as db:
+        await db.execute(
+            """INSERT INTO comments (id, video_id, author_id, parent_id, root_id,
+                                      body, status, like_count, dislike_count,
+                                      score, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, 'active', 0, 0, 0, ?, ?)""",
+            (comment_id, video_id, author_id, parent_id, root_id, body, now, now),
+        )
+        await db.commit()
+
+
+async def get_comment(comment_id: str) -> dict | None:
+    async with aiosqlite.connect(config.db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            _COMMENT_SELECT + " WHERE c.id = ?", (comment_id,))
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+async def list_top_comments(video_id: str, sort: str, limit: int,
+                            offset: int) -> list[dict]:
+    order = ("c.score DESC, c.created_at DESC" if sort == "top"
+             else "c.created_at DESC")
+    async with aiosqlite.connect(config.db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            _COMMENT_SELECT
+            + " WHERE c.video_id = ? AND c.parent_id IS NULL"
+            + f" ORDER BY {order} LIMIT ? OFFSET ?",
+            (video_id, limit, offset),
+        )
+        return [dict(r) for r in await cursor.fetchall()]
+
+
+async def count_top_comments(video_id: str) -> int:
+    async with aiosqlite.connect(config.db_path) as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM comments WHERE video_id = ? AND parent_id IS NULL",
+            (video_id,))
+        return (await cursor.fetchone())[0]
+
+
+async def list_replies(root_id: str, limit: int, offset: int) -> list[dict]:
+    async with aiosqlite.connect(config.db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            _COMMENT_SELECT
+            + " WHERE c.root_id = ? ORDER BY c.created_at ASC LIMIT ? OFFSET ?",
+            (root_id, limit, offset),
+        )
+        return [dict(r) for r in await cursor.fetchall()]
+
+
+async def count_replies(root_id: str) -> int:
+    async with aiosqlite.connect(config.db_path) as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM comments WHERE root_id = ? AND status = 'active'",
+            (root_id,))
+        return (await cursor.fetchone())[0]
+
+
+async def reply_counts(root_ids: list[str]) -> dict[str, int]:
+    if not root_ids:
+        return {}
+    placeholders = ",".join("?" * len(root_ids))
+    async with aiosqlite.connect(config.db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            f"""SELECT root_id, COUNT(*) AS n FROM comments
+                WHERE root_id IN ({placeholders}) AND status = 'active'
+                GROUP BY root_id""",
+            tuple(root_ids),
+        )
+        return {r["root_id"]: r["n"] for r in await cursor.fetchall()}
+
+
+async def soft_delete_comment(comment_id: str) -> None:
+    async with aiosqlite.connect(config.db_path) as db:
+        await db.execute(
+            "UPDATE comments SET status='deleted', body='', updated_at=? "
+            "WHERE id = ?",
+            (time.time(), comment_id),
+        )
+        await db.commit()
+
+
+async def viewer_votes(user_id: str, comment_ids: list[str]) -> dict[str, int]:
+    if not comment_ids:
+        return {}
+    placeholders = ",".join("?" * len(comment_ids))
+    async with aiosqlite.connect(config.db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            f"""SELECT comment_id, value FROM comment_votes
+                WHERE user_id = ? AND comment_id IN ({placeholders})""",
+            (user_id, *comment_ids),
+        )
+        return {r["comment_id"]: r["value"] for r in await cursor.fetchall()}
+
+
+async def apply_vote(user_id: str, comment_id: str, value: int) -> dict:
+    """Set the viewer's vote to value (+1/-1/0) and refresh denormalized counts.
+
+    Runs entirely in one connection (single writer => no cross-process race).
+    Returns {like_count, dislike_count, score}.
+    """
+    now = time.time()
+    async with aiosqlite.connect(config.db_path) as db:
+        cur = await db.execute(
+            "SELECT value FROM comment_votes WHERE user_id = ? AND comment_id = ?",
+            (user_id, comment_id),
+        )
+        row = await cur.fetchone()
+        old = row[0] if row else None
+        if old != value:
+            like_delta = dislike_delta = 0
+            if value == 1:
+                like_delta += 1
+            elif value == -1:
+                dislike_delta += 1
+            if old == 1:
+                like_delta -= 1
+            elif old == -1:
+                dislike_delta -= 1
+
+            if value == 0:
+                await db.execute(
+                    "DELETE FROM comment_votes WHERE user_id = ? AND comment_id = ?",
+                    (user_id, comment_id),
+                )
+            elif old is None:
+                await db.execute(
+                    """INSERT INTO comment_votes
+                       (user_id, comment_id, value, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (user_id, comment_id, value, now, now),
+                )
+            else:
+                await db.execute(
+                    """UPDATE comment_votes SET value = ?, updated_at = ?
+                       WHERE user_id = ? AND comment_id = ?""",
+                    (value, now, user_id, comment_id),
+                )
+            await db.execute(
+                """UPDATE comments
+                   SET like_count = like_count + ?,
+                       dislike_count = dislike_count + ?,
+                       score = (like_count + ?) - (dislike_count + ?),
+                       updated_at = ?
+                   WHERE id = ?""",
+                (like_delta, dislike_delta, like_delta, dislike_delta, now,
+                 comment_id),
+            )
+        cur = await db.execute(
+            "SELECT like_count, dislike_count, score FROM comments WHERE id = ?",
+            (comment_id,),
+        )
+        r = await cur.fetchone()
+        await db.commit()
+        return {"like_count": r[0], "dislike_count": r[1], "score": r[2]}
