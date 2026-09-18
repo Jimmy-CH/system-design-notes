@@ -3,6 +3,7 @@ import { authState, hasRole } from './auth'
 import AdminUsersView from './views/AdminUsersView.vue'
 import HomeView from './views/HomeView.vue'
 import LoginView from './views/LoginView.vue'
+import ModerationView from './views/ModerationView.vue'
 import MyVideosView from './views/MyVideosView.vue'
 import RegisterView from './views/RegisterView.vue'
 import UploadView from './views/UploadView.vue'
@@ -26,6 +27,11 @@ const router = createRouter({
       path: '/admin/users',
       component: AdminUsersView,
       meta: { requiresAuth: true, role: 'admin' },
+    },
+    {
+      path: '/moderation',
+      component: ModerationView,
+      meta: { requiresAuth: true, role: 'moderator' },
     },
     { path: '/watch/:id', component: WatchView },
   ],

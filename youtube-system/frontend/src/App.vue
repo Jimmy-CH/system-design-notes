@@ -50,6 +50,9 @@ function go(path) {
               <button v-if="hasRole('admin')" class="dropdown-item" @click="go('/admin/users')">
                 Admin panel
               </button>
+              <button v-if="hasRole('moderator')" class="dropdown-item" @click="go('/moderation')">
+                Moderation
+              </button>
               <button class="dropdown-item" @click="signOut">Sign out</button>
             </div>
           </div>
