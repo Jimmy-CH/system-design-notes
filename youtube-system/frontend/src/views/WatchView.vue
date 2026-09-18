@@ -65,6 +65,17 @@ function play(url) {
       levels.value = hls.levels.map((l, i) => ({ i, height: l.height }))
       hls.currentLevel = -1 // auto by default
     })
+    hls.on(Hls.Events.ERROR, (_evt, data) => {
+      if (!data.fatal) return
+      if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+        error.value = 'Unable to fetch decryption key – please log in and retry'
+        hls.startLoad()
+      } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+        hls.recoverMediaError()
+      } else {
+        error.value = 'Playback failed: ' + data.details
+      }
+    })
   } else if (el.canPlayType('application/vnd.apple.mpegurl')) {
     el.src = url // Safari native HLS (no custom key auth)
   }

@@ -37,7 +37,7 @@ async def process_video(task: dict, redis, resource_manager) -> None:
         key_file = os.path.join(keys_dir, f"{video_id}.key")
         key_info_path = None
         if os.path.exists(key_file):
-            key_info_path = os.path.join(out_root, "key_info.txt")
+            key_info_path = os.path.join(keys_dir, f"{video_id}_info.txt")
             with open(key_info_path, "w", encoding="utf-8") as kf:
                 kf.write(f"/api/keys/{video_id}\n")
                 kf.write(f"{key_file}\n")
