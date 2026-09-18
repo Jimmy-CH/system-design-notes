@@ -7,6 +7,7 @@ layer stays HTTP-agnostic.
 import json
 import logging
 import secrets
+import sqlite3
 import time
 
 from app import database
@@ -75,6 +76,12 @@ def _user_out(row: dict) -> dict:
     }
 
 
+# Thrown-away bcrypt hash so login can run verify_password() even when the
+# account is unknown, keeping response time independent of email existence
+# (spec 4.4: no enumeration). Generated once at import; never a real password.
+_DUMMY_HASH = security.hash_password(secrets.token_hex(16))
+
+
 async def revoke_all_refresh(user_id: str) -> int:
     """Drop every session of a user (logout, ban, replay defence)."""
     prefix = security.refresh_prefix(user_id)
@@ -110,8 +117,13 @@ async def register(username: str, email: str, password: str) -> dict:
     if await database.get_user_by_username(username):
         raise ConflictError("username is already taken")
     user_id = secrets.token_hex(12)
-    await database.insert_user(
-        user_id, username, email, security.hash_password(password), "user")
+    try:
+        await database.insert_user(
+            user_id, username, email, security.hash_password(password), "user")
+    except sqlite3.IntegrityError:
+        # The pre-checks above are not atomic; a concurrent registration can
+        # win the UNIQUE race. Surface it as 409, never a 500.
+        raise ConflictError("username or email already taken")
     row = await database.get_user_by_id(user_id)
     logger.info("Registered user %s (%s)", username, user_id)
     return _user_out(row)
@@ -119,8 +131,11 @@ async def register(username: str, email: str, password: str) -> dict:
 
 async def login(email: str, password: str) -> dict:
     user = await database.get_user_by_email(email)
-    # One message for both failure modes - no account enumeration (spec 4.4).
-    if user is None or not security.verify_password(password, user["password_hash"]):
+    # Always run bcrypt - against the dummy hash when the account is unknown -
+    # so the 401 is indistinguishable in both message AND timing (spec 4.4).
+    password_ok = security.verify_password(
+        password, user["password_hash"] if user else _DUMMY_HASH)
+    if user is None or not password_ok:
         raise AuthError("invalid email or password")
     if user["status"] != "active":
         raise PermissionError("account is banned")
@@ -128,30 +143,40 @@ async def login(email: str, password: str) -> dict:
 
 
 async def refresh(refresh_token: str) -> dict:
-    """Rotate the refresh token; treat a replayed one as a breach (spec 2.3)."""
+    """Rotate the refresh token; treat a genuine replay as a breach (spec 2.3).
+
+    Single-use is enforced atomically with GETDEL (no double-spend race), and a
+    mass-revocation fires only when the submitted token matches one we actually
+    rotated away earlier (its tombstone exists). Random garbage - even prefixed
+    with a real user_id - therefore cannot evict that user's sessions.
+    """
     user_id = security.split_refresh_token(refresh_token)
     if user_id is None:
         raise AuthError("invalid refresh token")
 
     key = security.refresh_key(user_id, refresh_token)
-    if await _redis.get(key) is None:
-        # Absent == already rotated away == probable replay: kill every session
-        # this user has and force a re-login.
-        revoked = await revoke_all_refresh(user_id)
-        logger.warning("Refresh replay suspected for user %s; revoked %d tokens",
-                       user_id, revoked)
+    # GETDEL consumes the active token in one step; None means it is not live.
+    if await _redis.getdel(key) is None:
+        # Only a token we previously rotated away (tombstone present) is a real
+        # replay worth revoking everything. Unknown garbage is just rejected.
+        if await _redis.exists(security.used_key(refresh_token)):
+            revoked = await revoke_all_refresh(user_id)
+            logger.warning("Refresh replay suspected for user %s; revoked %d tokens",
+                           user_id, revoked)
         raise AuthError("invalid refresh token")
 
     user = await database.get_user_by_id(user_id)
     if user is None:
-        await _redis.delete(key)
         raise AuthError("invalid refresh token")
     if user["status"] != "active":
         # Ban takes effect here at the latest (spec 2.5, layer 3).
         await revoke_all_refresh(user_id)
         raise AuthError("account is banned")
 
-    await _redis.delete(key)
+    # Tombstone the consumed token so a later replay of it is recognisable,
+    # then mint a fresh pair.
+    await _redis.set(security.used_key(refresh_token), "1",
+                     ex=config.refresh_token_ttl)
     return await _issue_tokens(user)
 
 

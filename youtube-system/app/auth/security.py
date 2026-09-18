@@ -90,6 +90,15 @@ def refresh_prefix(user_id: str) -> str:
     return f"refresh:{user_id}:"
 
 
+def used_key(token: str) -> str:
+    """Tombstone marking a refresh token as already rotated away.
+
+    Lets refresh() tell a genuine replay (a token we really issued and then
+    rotated) apart from random garbage: mass-revocation fires only on a real
+    replay, so a stranger cannot evict a victim by guessing their user_id."""
+    return f"refresh:used:{hash_token(token)}"
+
+
 def ban_key(user_id: str) -> str:
     """Redis key marking a user as banned. get_current_user checks EXISTS on it
     (one O(1) GET, no DB) so a ban revokes even a live access token immediately
