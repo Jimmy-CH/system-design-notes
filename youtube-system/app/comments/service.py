@@ -94,3 +94,27 @@ async def list_replies(comment_id: str, limit: int, offset: int, viewer) -> dict
     out = [_out(r, reply_count=0, my_vote=votes.get(r["id"], 0)) for r in rows]
     return {"comments": out, "total": total,
             "has_more": offset + len(rows) < total}
+
+
+async def vote(comment_id: str, user_id: str, value: int) -> dict:
+    if value not in (-1, 0, 1):
+        raise ValidationError("value must be -1, 0 or 1")
+    row = await database.get_comment(comment_id)
+    if row is None:
+        raise NotFoundError("comment not found")
+    if row["status"] != "active":
+        raise ValidationError("cannot vote on a deleted comment")
+    counters = await database.apply_vote(user_id, comment_id, value)
+    return {**counters, "my_vote": value}
+
+
+async def delete_comment(comment_id: str, actor_id: str, actor_role: str) -> None:
+    row = await database.get_comment(comment_id)
+    if row is None:
+        raise NotFoundError("comment not found")
+    is_author = row["author_id"] == actor_id
+    is_staff = ROLE_LEVEL.get(actor_role, 0) >= _MODERATOR_LEVEL
+    if not (is_author or is_staff):
+        raise PermissionDenied("not allowed to delete this comment")
+    if row["status"] == "active":
+        await database.soft_delete_comment(comment_id)
