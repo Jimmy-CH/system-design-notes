@@ -17,6 +17,7 @@ from app.auth.router import router as auth_router
 from app.comments.router import router as comments_router
 from app.moderation.router import router as moderation_router
 from app.moderation import service as moderation_service
+from app import drm
 from app.completion_consumer import run_consumer
 from app.config import config
 from app.models import UploadUrlRequest, UploadUrlResponse, VideoCreateRequest
@@ -57,6 +58,7 @@ app = FastAPI(title="YouTube Video Streaming System", lifespan=lifespan)
 app.include_router(auth_router)
 app.include_router(comments_router)
 app.include_router(moderation_router)
+app.include_router(drm.router)
 
 
 def _card(v: dict) -> dict:
@@ -148,6 +150,7 @@ async def create_video(req: VideoCreateRequest,
 
     await database.insert_video(video_id, req.title, req.description,
                                 original_path, uploader_id=user.id)
+    drm.generate_key(video_id)
     await push_task(redis, {"video_id": video_id, "original_path": original_path})
     logger.info("video %s queued for transcoding (uploader %s)", video_id, user.id)
     return {"video_id": video_id, "status": "pending"}
