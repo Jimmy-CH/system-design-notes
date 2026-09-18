@@ -24,5 +24,11 @@ class Config:
     max_upload_bytes: int = 1 << 30  # 1GB
     allowed_exts: tuple = ("mp4", "mov", "avi", "mkv", "webm")
 
+    # Auth: JWT access token (stateless) + opaque refresh token (Redis)
+    jwt_secret: str = os.getenv("JWT_SECRET", "dev-only-secret-change-in-production")
+    access_token_ttl: int = int(os.getenv("ACCESS_TOKEN_TTL", "900"))       # 15min
+    refresh_token_ttl: int = int(os.getenv("REFRESH_TOKEN_TTL", "604800"))  # 7d
+    ban_marker_ttl: int = int(os.getenv("BAN_MARKER_TTL", "86400"))         # 1d, see spec 2.5
+
 
 config = Config()
