@@ -171,3 +171,20 @@ export function deleteComment(commentId) {
 export function voteComment(commentId, value) {
   return http.put(`/api/comments/${commentId}/vote`, { value })
 }
+
+// ---- moderation ----
+export function listModerationQueue(limit = 50, offset = 0) {
+  return http.get('/api/moderation/queue', { params: { limit, offset } })
+}
+
+export function approveVideo(videoId) {
+  return http.post(`/api/moderation/${videoId}/approve`)
+}
+
+export function rejectVideo(videoId, reason) {
+  return http.post(`/api/moderation/${videoId}/reject`, { reason })
+}
+
+export function resubmitVideo(videoId, title, description) {
+  return http.post(`/api/videos/${videoId}/resubmit`, { title, description })
+}
