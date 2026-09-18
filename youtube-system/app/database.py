@@ -43,24 +43,51 @@ async def init_db() -> None:
                 UNIQUE(video_id, resolution)
             );
             CREATE INDEX IF NOT EXISTS idx_renditions_video ON renditions(video_id);
+            CREATE TABLE IF NOT EXISTS users (
+                id TEXT PRIMARY KEY,
+                username TEXT NOT NULL UNIQUE,
+                email TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'user',
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
         """)
+        # videos.uploader_id is nullable: rows created before the user system
+        # stay anonymous. SQLite has no ADD COLUMN IF NOT EXISTS, so probe first.
+        cursor = await db.execute("PRAGMA table_info(videos)")
+        columns = {row[1] for row in await cursor.fetchall()}
+        if "uploader_id" not in columns:
+            await db.execute(
+                "ALTER TABLE videos ADD COLUMN uploader_id TEXT REFERENCES users(id)")
+            logger.info("Migrated videos: added uploader_id column")
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_videos_uploader ON videos(uploader_id)")
         await db.commit()
     logger.info("Database initialized")
 
 
+_VIDEO_SELECT = """
+    SELECT v.*, u.username AS uploader_username
+    FROM videos v LEFT JOIN users u ON v.uploader_id = u.id
+"""
+
+
 async def insert_video(video_id: str, title: str, description: str,
-                       original_path: str) -> None:
+                       original_path: str, uploader_id: str | None = None) -> None:
     now = time.time()
     async with aiosqlite.connect(config.db_path) as db:
         await db.execute(
             """INSERT INTO videos (id, title, description, status, original_path,
-                                   created_at, updated_at)
-               VALUES (?, ?, ?, 'pending', ?, ?, ?)
+                                   uploader_id, created_at, updated_at)
+               VALUES (?, ?, ?, 'pending', ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET
                  title=excluded.title, description=excluded.description,
-                 original_path=excluded.original_path, status='pending',
+                 original_path=excluded.original_path,
+                 uploader_id=excluded.uploader_id, status='pending',
                  error_msg=NULL, updated_at=excluded.updated_at""",
-            (video_id, title, description, original_path, now, now),
+            (video_id, title, description, original_path, uploader_id, now, now),
         )
         await db.commit()
 
@@ -68,7 +95,8 @@ async def insert_video(video_id: str, title: str, description: str,
 async def get_video(video_id: str) -> dict | None:
     async with aiosqlite.connect(config.db_path) as db:
         db.row_factory = aiosqlite.Row
-        cursor = await db.execute("SELECT * FROM videos WHERE id = ?", (video_id,))
+        cursor = await db.execute(
+            _VIDEO_SELECT + " WHERE v.id = ?", (video_id,))
         row = await cursor.fetchone()
         return dict(row) if row else None
 
@@ -76,7 +104,17 @@ async def get_video(video_id: str) -> dict | None:
 async def list_videos() -> list[dict]:
     async with aiosqlite.connect(config.db_path) as db:
         db.row_factory = aiosqlite.Row
-        cursor = await db.execute("SELECT * FROM videos ORDER BY created_at DESC")
+        cursor = await db.execute(_VIDEO_SELECT + " ORDER BY v.created_at DESC")
+        return [dict(r) for r in await cursor.fetchall()]
+
+
+async def list_videos_by_uploader(uploader_id: str) -> list[dict]:
+    async with aiosqlite.connect(config.db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            _VIDEO_SELECT + " WHERE v.uploader_id = ? ORDER BY v.created_at DESC",
+            (uploader_id,),
+        )
         return [dict(r) for r in await cursor.fetchall()]
 
 
@@ -149,3 +187,76 @@ async def count_by_status() -> dict[str, int]:
     async with aiosqlite.connect(config.db_path) as db:
         cursor = await db.execute("SELECT status, COUNT(*) FROM videos GROUP BY status")
         return {row[0]: row[1] for row in await cursor.fetchall()}
+
+
+async def insert_user(user_id: str, username: str, email: str,
+                      password_hash: str, role: str) -> None:
+    now = time.time()
+    async with aiosqlite.connect(config.db_path) as db:
+        await db.execute(
+            """INSERT INTO users (id, username, email, password_hash, role,
+                                  status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, 'active', ?, ?)""",
+            (user_id, username, email, password_hash, role, now, now),
+        )
+        await db.commit()
+
+
+async def get_user_by_email(email: str) -> dict | None:
+    async with aiosqlite.connect(config.db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT * FROM users WHERE email = ?", (email,))
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+async def get_user_by_username(username: str) -> dict | None:
+    async with aiosqlite.connect(config.db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM users WHERE username = ?", (username,))
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+async def get_user_by_id(user_id: str) -> dict | None:
+    async with aiosqlite.connect(config.db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+async def list_users(limit: int = 50, offset: int = 0) -> list[dict]:
+    async with aiosqlite.connect(config.db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        )
+        return [dict(r) for r in await cursor.fetchall()]
+
+
+async def count_users() -> int:
+    async with aiosqlite.connect(config.db_path) as db:
+        cursor = await db.execute("SELECT COUNT(*) FROM users")
+        row = await cursor.fetchone()
+        return row[0]
+
+
+async def set_user_role(user_id: str, role: str) -> None:
+    async with aiosqlite.connect(config.db_path) as db:
+        await db.execute(
+            "UPDATE users SET role = ?, updated_at = ? WHERE id = ?",
+            (role, time.time(), user_id),
+        )
+        await db.commit()
+
+
+async def set_user_status(user_id: str, status: str) -> None:
+    async with aiosqlite.connect(config.db_path) as db:
+        await db.execute(
+            "UPDATE users SET status = ?, updated_at = ? WHERE id = ?",
+            (status, time.time(), user_id),
+        )
+        await db.commit()
