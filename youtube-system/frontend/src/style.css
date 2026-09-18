@@ -338,3 +338,18 @@ table.users .row-actions { display: flex; gap: 8px; align-items: center; }
 
 .replies { margin-left: 24px; border-left: 2px solid var(--border); padding-left: 12px; }
 .comments-empty { color: var(--text-dim); font-size: 13px; padding: 8px 0; }
+
+/* ---- Moderation ---- */
+.badge.pending_review { background: #f59e0b; color: #000; }
+.badge.rejected { background: #ef4444; color: #fff; cursor: help; }
+.moderation-banner { margin: 12px 0; padding: 8px 12px; border-radius: 6px; font-size: 14px; }
+.moderation-page h2 { color: var(--text); }
+.mod-item { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--border); }
+.mod-info { flex: 1; min-width: 0; }
+.mod-title { font-weight: 600; color: var(--accent); text-decoration: none; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mod-meta { font-size: 12px; color: var(--text-dim); }
+.mod-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.mod-reject-form { width: 100%; display: flex; gap: 8px; margin-top: 8px; }
+.mod-reject-form input { flex: 1; padding: 6px 10px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text); }
+.mod-loading { color: var(--text-dim); }
+.mod-summary { color: var(--text-dim); font-size: 13px; margin-top: 12px; }

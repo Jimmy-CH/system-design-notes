@@ -95,6 +95,12 @@ onUnmounted(() => {
         <div class="player-box">
           <video ref="videoEl" controls></video>
         </div>
+        <div v-if="video.moderation_status === 'pending_review'" class="badge pending_review moderation-banner">
+          Under review – only you (owner) and moderators can see this page
+        </div>
+        <div v-else-if="video.moderation_status === 'rejected'" class="error-box moderation-banner">
+          Rejected: {{ video.rejection_reason }}
+        </div>
         <h2 style="margin: 14px 0 4px">{{ video.title }}</h2>
         <p class="uploader">👤 {{ uploaderName }}</p>
         <p style="color: var(--text-dim)">{{ video.description }}</p>

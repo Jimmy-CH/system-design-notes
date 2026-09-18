@@ -1,7 +1,7 @@
 <script setup>
 import { onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { extractError, listMyVideos, retryVideo } from '../api'
+import { extractError, listMyVideos, resubmitVideo, retryVideo } from '../api'
 
 const router = useRouter()
 const videos = ref([])
@@ -42,6 +42,19 @@ async function doRetry(id) {
   }
 }
 
+async function doResubmit(v) {
+  busyId.value = v.id
+  error.value = ''
+  try {
+    await resubmitVideo(v.id, v.title, v.description || '')
+    await refresh()
+  } catch (e) {
+    error.value = extractError(e, 'Resubmit failed')
+  } finally {
+    busyId.value = ''
+  }
+}
+
 onMounted(() => {
   refresh()
   // Poll only while something is still in flight; the backend drives statuses.
@@ -72,6 +85,8 @@ onUnmounted(() => clearInterval(timer))
           <p class="card-title">{{ v.title }}</p>
           <div class="card-meta">
             <span class="badge" :class="v.status">{{ v.status }}</span>
+            <span v-if="v.moderation_status === 'pending_review'" class="badge pending_review">审核中</span>
+            <span v-else-if="v.moderation_status === 'rejected'" class="badge rejected" :title="v.rejection_reason">已拒绝</span>
             <span v-if="v.duration_sec"> · {{ fmtDuration(v.duration_sec) }}</span>
           </div>
           <p class="uploader">{{ fmtDate(v.created_at) }}</p>
@@ -83,6 +98,15 @@ onUnmounted(() => clearInterval(timer))
             @click.stop="doRetry(v.id)"
           >
             {{ busyId === v.id ? 'Retrying…' : 'Retry transcode' }}
+          </button>
+          <button
+            v-if="v.moderation_status === 'rejected'"
+            class="btn tiny"
+            style="margin-top: 8px"
+            :disabled="busyId === v.id"
+            @click.stop="doResubmit(v)"
+          >
+            {{ busyId === v.id ? 'Submitting…' : 'Resubmit' }}
           </button>
         </div>
       </div>

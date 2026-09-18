@@ -19,6 +19,7 @@
 - **评论与 1 级回复**：视频下评论、回复归入同一顶级线程；读公开、登录可写
 - **评论赞/踩**：每人每评论一票，可切换/取消，反范式净分用于热度排序
 - **评论治理**：作者软删除自己评论（留占位），moderator/admin 可删任意
+- **视频内容审核** — 先审后发（moderator+ 审核队列 approve/reject）；拒绝可编辑后重新提交，不重转码
 
 ## 架构
 
@@ -190,6 +191,15 @@ docker compose up -d --scale transcoder-worker=3
 
 投票计数走 `comments` 冗余列（`like_count/dislike_count/score`）+ `comment_votes(user_id, comment_id, value)` 主键唯一，`apply_vote` 单事务更新。模块位于 `app/comments/`（`schemas/service/router`），复用 `app/auth/dependencies` 的鉴权与 `ROLE_LEVEL`。
 
+### 视频审核（Moderation）
+
+| 方法 | 路径 | 权限 | 说明 |
+|------|------|------|------|
+| GET | `/api/moderation/queue` | moderator+ | 待审列表 `{videos, total}`，`?limit&offset` |
+| POST | `/api/moderation/{id}/approve` | moderator+ | 通过 → 204 |
+| POST | `/api/moderation/{id}/reject` | moderator+ | 拒绝 `{reason}` → 204 |
+| POST | `/api/videos/{id}/resubmit` | owner | 重新提交 `{title,description}` → 204 |
+
 ## 设计要点（对照设计文档）
 
 1. **并行上传**：设计文档要求元数据与二进制走不同服务并行处理；本实现元数据在二进制落盘后注册（保证 `create_video` 校验二进制存在），时序上简化为顺序但接口边界保持分离。
@@ -207,6 +217,9 @@ docker compose up -d --scale transcoder-worker=3
 13. **1 级线程靠 root_id 归位**：回复的回复不新增层级，`root_id` 恒指向顶级评论，`parent_id` 记录“回复谁”。
 14. **软删除保线程**：删除仅置 `status=deleted` 并屏蔽正文，回复链不断裂。
 15. **反范式计数**：单写者事务内同步 `comment_votes` 与 `comments` 计数，排序走索引列，热读高效。
+16. **Moderation status is orthogonal to transcode status** — `moderation_status` (pending_review/approved/rejected) is independent from `status` (pending/processing/ready/failed); a video is publicly visible only when `status='ready' AND moderation_status='approved'`.
+17. **Visibility gate at API level, not CDN** — non-approved videos return 404; since video IDs are random hex, the CDN path is not guessable. True CDN-level auth is deferred to the DRM module.
+18. **FIFO review queue** — videos enter moderation after transcode completes, oldest first; rejected videos re-enter queue via resubmit (no re-transcode).
 
 ## 技术栈
 
