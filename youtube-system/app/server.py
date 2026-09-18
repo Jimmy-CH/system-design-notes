@@ -5,10 +5,15 @@ import os
 import shutil
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 
 from app import database
 from app import presign
+from app.auth import security
+from app.auth import service as auth_service
+from app.auth import dependencies as auth_deps
+from app.auth.dependencies import CurrentUser, get_current_user, require_role
+from app.auth.router import router as auth_router
 from app.completion_consumer import run_consumer
 from app.config import config
 from app.models import UploadUrlRequest, UploadUrlResponse, VideoCreateRequest
@@ -30,7 +35,10 @@ async def lifespan(app: FastAPI):
     os.makedirs(config.original_dir, exist_ok=True)
     os.makedirs(config.transcoded_dir, exist_ok=True)
     await database.init_db()
+    await auth_service.ensure_seed_users()
     redis = create_client()
+    auth_service.bind_redis(redis)
+    auth_deps.bind_redis(redis)
     consumer_stop.clear()
     consumer_task = asyncio.create_task(run_consumer(consumer_stop))
     logger.info("API server started")
@@ -43,9 +51,12 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="YouTube Video Streaming System", lifespan=lifespan)
+app.include_router(auth_router)
 
 
 def _card(v: dict) -> dict:
+    uploader = ({"id": v["uploader_id"], "username": v.get("uploader_username")}
+                if v.get("uploader_id") else None)
     return {
         "id": v["id"],
         "title": v["title"],
@@ -54,6 +65,7 @@ def _card(v: dict) -> dict:
         "duration_sec": v["duration_sec"],
         "thumbnail_url": f"/media/{v['id']}/thumbnail.jpg"
                          if v["status"] == "ready" else None,
+        "uploader": uploader,
         "created_at": v["created_at"],
     }
 
@@ -64,9 +76,10 @@ async def health():
 
 
 @app.post("/api/upload-url", response_model=UploadUrlResponse)
-async def create_upload_url(req: UploadUrlRequest):
+async def create_upload_url(req: UploadUrlRequest,
+                            user: CurrentUser = Depends(require_role("creator"))):
     try:
-        return presign.issue(req.filename, req.size)
+        return presign.issue(req.filename, req.size, user.id)
     except PresignError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -106,11 +119,18 @@ async def upload_binary(token: str, request: Request):
 
 
 @app.post("/api/videos")
-async def create_video(req: VideoCreateRequest):
+async def create_video(req: VideoCreateRequest,
+                       user: CurrentUser = Depends(require_role("creator"))):
     video_id = req.video_id
     ext = ext_of(req.filename)
     if ext not in config.allowed_exts:
         raise HTTPException(status_code=400, detail=f"Unsupported extension .{ext}")
+
+    # The pre-signed URL was issued to exactly one user; refuse to let anyone
+    # else register the video it produced (spec 4.3).
+    if not presign.claim_owner(video_id, user.id):
+        raise HTTPException(
+            status_code=403, detail="This upload token was not issued to you")
 
     original_path = os.path.join(config.original_dir, video_id, f"original.{ext}")
     if not os.path.exists(original_path):
@@ -119,10 +139,22 @@ async def create_video(req: VideoCreateRequest):
             detail="Binary not found; finish the upload first",
         )
 
-    await database.insert_video(video_id, req.title, req.description, original_path)
+    await database.insert_video(video_id, req.title, req.description,
+                                original_path, uploader_id=user.id)
     await push_task(redis, {"video_id": video_id, "original_path": original_path})
-    logger.info("video %s queued for transcoding", video_id)
+    logger.info("video %s queued for transcoding (uploader %s)", video_id, user.id)
     return {"video_id": video_id, "status": "pending"}
+
+
+@app.get("/api/videos/mine")
+async def my_videos(user: CurrentUser = Depends(require_role("creator"))):
+    """Own uploads, failed ones included (spec 4.2).
+
+    Declared BEFORE /api/videos/{video_id} so the literal segment is not
+    swallowed by the path parameter.
+    """
+    rows = await database.list_videos_by_uploader(user.id)
+    return {"videos": [_card(v) for v in rows]}
 
 
 @app.get("/api/videos")
@@ -145,10 +177,18 @@ async def get_video(video_id: str):
 
 
 @app.post("/api/videos/{video_id}/retry")
-async def retry_video(video_id: str):
+async def retry_video(video_id: str,
+                      user: CurrentUser = Depends(get_current_user)):
     v = await database.get_video(video_id)
     if v is None:
         raise HTTPException(status_code=404, detail="Video not found")
+
+    is_owner = v.get("uploader_id") == user.id
+    is_staff = (security.ROLE_LEVEL.get(user.role, 0)
+                >= security.ROLE_LEVEL["moderator"])
+    if not (is_owner or is_staff):
+        raise HTTPException(status_code=403, detail="Not your video")
+
     if v["status"] != "failed":
         raise HTTPException(
             status_code=400, detail=f"Only failed videos can be retried (current: {v['status']})")
@@ -157,12 +197,12 @@ async def retry_video(video_id: str):
 
     await database.set_video_status(video_id, "pending")
     await push_task(redis, {"video_id": video_id, "original_path": v["original_path"]})
-    logger.info("video %s re-queued for transcoding", video_id)
+    logger.info("video %s re-queued for transcoding by %s", video_id, user.id)
     return {"video_id": video_id, "status": "pending"}
 
 
 @app.get("/api/stats")
-async def stats():
+async def stats(_: CurrentUser = Depends(require_role("moderator"))):
     queued = await redis.llen(config.task_queue)
     pattern = "worker:*"
     workers = 0
