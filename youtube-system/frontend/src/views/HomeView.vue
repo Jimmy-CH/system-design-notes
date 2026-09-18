@@ -7,6 +7,10 @@ const router = useRouter()
 const videos = ref([])
 let timer = null
 
+function uploaderName(v) {
+  return v.uploader?.username || 'Anonymous'
+}
+
 function fmtDuration(sec) {
   if (!sec) return ''
   const m = Math.floor(sec / 60)
@@ -31,7 +35,7 @@ onUnmounted(() => clearInterval(timer))
 <template>
   <div>
     <div v-if="videos.length === 0" class="empty-state">
-      <p>No videos yet. Click Upload to add your first one.</p>
+      <p>No videos yet.</p>
     </div>
     <div class="grid">
       <div
@@ -44,6 +48,7 @@ onUnmounted(() => clearInterval(timer))
         <div v-else class="thumb-placeholder">🎬</div>
         <div class="card-body">
           <p class="card-title">{{ v.title }}</p>
+          <p class="uploader">{{ uploaderName(v) }}</p>
           <div class="card-meta">
             <span class="badge" :class="v.status">{{ v.status }}</span>
             <span v-if="v.duration_sec"> · {{ fmtDuration(v.duration_sec) }}</span>

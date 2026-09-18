@@ -1,8 +1,9 @@
 <script setup>
-import { ref, onMounted, onUnmounted, nextTick } from 'vue'
+import { computed, ref, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import Hls from 'hls.js'
-import { getVideo, retryVideo } from '../api'
+import { extractError, getVideo, retryVideo } from '../api'
+import { authState, hasRole } from '../auth'
 
 const route = useRoute()
 const video = ref(null)
@@ -13,6 +14,15 @@ const levels = ref([])
 const currentLevel = ref(-1)
 const started = ref(false)
 let timer = null
+
+const uploaderName = computed(() => video.value?.uploader?.username || 'Anonymous')
+
+// Owner or staff (moderator+) may retry - mirrors the backend rule exactly.
+const canRetry = computed(() => {
+  const me = authState.user
+  if (!me || !video.value) return false
+  return video.value.uploader?.id === me.id || hasRole('moderator')
+})
 
 async function load() {
   try {
@@ -31,7 +41,7 @@ async function load() {
       timer = null
     }
   } catch (e) {
-    error.value = e?.response?.data?.detail || e.message
+    error.value = extractError(e)
   }
 }
 
@@ -63,7 +73,7 @@ async function doRetry() {
     await load()
     if (!timer) timer = setInterval(load, 3000)
   } catch (e) {
-    error.value = e?.response?.data?.detail || e.message
+    error.value = extractError(e)
   }
 }
 
@@ -85,6 +95,7 @@ onUnmounted(() => {
           <video ref="videoEl" controls></video>
         </div>
         <h2 style="margin: 14px 0 4px">{{ video.title }}</h2>
+        <p class="uploader">👤 {{ uploaderName }}</p>
         <p style="color: var(--text-dim)">{{ video.description }}</p>
 
         <div v-if="video.status === 'processing'" class="badge processing">
@@ -95,7 +106,9 @@ onUnmounted(() => {
         </div>
         <div v-else-if="video.status === 'failed'" class="error-box">
           Transcoding failed: {{ video.error_msg }}
-          <button class="btn" style="margin-left: 12px" @click="doRetry">Retry</button>
+          <button v-if="canRetry" class="btn" style="margin-left: 12px" @click="doRetry">
+            Retry
+          </button>
         </div>
 
         <div v-if="levels.length" style="margin-top: 12px">

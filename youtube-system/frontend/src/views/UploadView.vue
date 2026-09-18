@@ -1,7 +1,8 @@
 <script setup>
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { getUploadUrl, uploadBinary, createVideo } from '../api'
+import { createVideo, extractError, getUploadUrl, uploadBinary } from '../api'
+import { authState, hasRole } from '../auth'
 
 const router = useRouter()
 const file = ref(null)
@@ -11,6 +12,10 @@ const progress = ref(0)
 const uploading = ref(false)
 const error = ref('')
 const dragging = ref(false)
+
+// A signed-in 'user' passes the route guard but still lacks upload rights;
+// explain it inline instead of letting a raw backend 403 surface.
+const canUpload = computed(() => hasRole('creator'))
 
 function pickFile(f) {
   if (f) {
@@ -25,6 +30,10 @@ function onDrop(e) {
 
 async function submit() {
   error.value = ''
+  if (!canUpload.value) {
+    error.value = 'Uploading requires the creator role'
+    return
+  }
   if (!file.value) { error.value = 'Please choose a video file'; return }
   if (!title.value.trim()) { error.value = 'Title is required'; return }
 
@@ -46,7 +55,9 @@ async function submit() {
 
     router.push('/')
   } catch (e) {
-    error.value = e?.response?.data?.detail || e.message || 'Upload failed'
+    error.value = e?.response?.status === 403
+      ? 'Uploading requires the creator role. Ask an admin to promote your account.'
+      : extractError(e, 'Upload failed')
   } finally {
     uploading.value = false
   }
@@ -56,6 +67,12 @@ async function submit() {
 <template>
   <div style="max-width: 560px; margin: 0 auto">
     <h2>Upload a video</h2>
+
+    <div v-if="!canUpload" class="hint-box">
+      Your account has the <strong>{{ authState.user?.role }}</strong> role.
+      Uploading requires <strong>creator</strong> or above — ask an admin to
+      promote you, then sign in again.
+    </div>
 
     <div
       class="dropzone"
@@ -96,7 +113,7 @@ async function submit() {
       Uploading… {{ progress }}%
     </p>
 
-    <button class="btn" :disabled="uploading" @click="submit">
+    <button class="btn" :disabled="uploading || !canUpload" @click="submit">
       {{ uploading ? 'Uploading…' : 'Upload' }}
     </button>
   </div>
