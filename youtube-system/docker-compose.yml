@@ -18,6 +18,10 @@ services:
       DB_PATH: data/youtube.db
       ORIGINAL_DIR: data/original
       TRANSCODED_DIR: data/transcoded
+      JWT_SECRET: "dev-only-secret-change-in-production"
+      ACCESS_TOKEN_TTL: "900"
+      REFRESH_TOKEN_TTL: "604800"
+      BAN_MARKER_TTL: "86400"
     volumes:
       - ./data:/app/data
     depends_on:

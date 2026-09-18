@@ -2195,8 +2195,8 @@ def main():
           requests.get(f"{API}/api/users", headers=hdr(admin_access)).status_code == 200)
     users_body = requests.get(f"{API}/api/users", headers=hdr(admin_access)).json()
     check("list users shape", {"users", "total"} <= set(users_body), list(users_body))
-    check("total >= 7 (2 seeds + 5 test users)",
-          users_body.get("total", 0) >= 7, users_body.get("total"))
+    check("total >= 6 (2 seeds + 4 test users registered before this point)",
+          users_body.get("total", 0) >= 6, users_body.get("total"))
     check("limit is capped at 100 (le=100 -> 422)",
           requests.get(f"{API}/api/users?limit=500",
                        headers=hdr(admin_access)).status_code == 422)
