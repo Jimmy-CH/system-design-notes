@@ -5,17 +5,18 @@ import os
 import shutil
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 
 from app import database
 from app import presign
 from app.auth import security
 from app.auth import service as auth_service
 from app.auth import dependencies as auth_deps
-from app.auth.dependencies import CurrentUser, get_current_user, require_role
+from app.auth.dependencies import CurrentUser, get_current_user, get_optional_user, require_role
 from app.auth.router import router as auth_router
 from app.comments.router import router as comments_router
 from app.moderation.router import router as moderation_router
+from app.moderation import service as moderation_service
 from app.completion_consumer import run_consumer
 from app.config import config
 from app.models import UploadUrlRequest, UploadUrlResponse, VideoCreateRequest
@@ -66,6 +67,8 @@ def _card(v: dict) -> dict:
         "title": v["title"],
         "description": v["description"],
         "status": v["status"],
+        "moderation_status": v.get("moderation_status", "approved"),
+        "rejection_reason": v.get("rejection_reason"),
         "duration_sec": v["duration_sec"],
         "thumbnail_url": f"/media/{v['id']}/thumbnail.jpg"
                          if v["status"] == "ready" else None,
@@ -162,15 +165,22 @@ async def my_videos(user: CurrentUser = Depends(require_role("creator"))):
 
 
 @app.get("/api/videos")
-async def list_videos():
-    rows = await database.list_videos()
-    return {"videos": [_card(v) for v in rows]}
+async def list_videos(limit: int = Query(50, ge=1, le=200),
+                      offset: int = Query(0, ge=0)):
+    rows = await database.list_videos_public(limit, offset)
+    total = await database.count_videos_public()
+    return {"videos": [_card(v) for v in rows], "total": total}
 
 
 @app.get("/api/videos/{video_id}")
-async def get_video(video_id: str):
+async def get_video(video_id: str,
+                    viewer: CurrentUser | None = Depends(get_optional_user)):
     v = await database.get_video(video_id)
     if v is None:
+        raise HTTPException(status_code=404, detail="Video not found")
+    try:
+        moderation_service.assert_visible(v, viewer)
+    except moderation_service.NotFoundError:
         raise HTTPException(status_code=404, detail="Video not found")
     out = _card(v)
     out["error_msg"] = v["error_msg"]
