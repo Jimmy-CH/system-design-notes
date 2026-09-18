@@ -90,6 +90,19 @@ async def init_db() -> None:
             await db.execute(
                 "ALTER TABLE videos ADD COLUMN uploader_id TEXT REFERENCES users(id)")
             logger.info("Migrated videos: added uploader_id column")
+        # moderation columns: existing rows get 'approved' (stay visible).
+        if "moderation_status" not in columns:
+            await db.execute(
+                "ALTER TABLE videos ADD COLUMN moderation_status "
+                "TEXT NOT NULL DEFAULT 'approved'")
+            logger.info("Migrated videos: added moderation_status column")
+        if "rejection_reason" not in columns:
+            await db.execute(
+                "ALTER TABLE videos ADD COLUMN rejection_reason TEXT")
+            logger.info("Migrated videos: added rejection_reason column")
+        await db.execute(
+            """CREATE INDEX IF NOT EXISTS idx_videos_public
+               ON videos(status, moderation_status, created_at)""")
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_videos_uploader ON videos(uploader_id)")
         await db.commit()
@@ -108,12 +121,13 @@ async def insert_video(video_id: str, title: str, description: str,
     async with aiosqlite.connect(config.db_path) as db:
         await db.execute(
             """INSERT INTO videos (id, title, description, status, original_path,
-                                   uploader_id, created_at, updated_at)
-               VALUES (?, ?, ?, 'pending', ?, ?, ?, ?)
+                                   uploader_id, moderation_status, created_at, updated_at)
+               VALUES (?, ?, ?, 'pending', ?, ?, 'pending_review', ?, ?)
                ON CONFLICT(id) DO UPDATE SET
                  title=excluded.title, description=excluded.description,
                  original_path=excluded.original_path,
                  uploader_id=excluded.uploader_id, status='pending',
+                 moderation_status='pending_review',
                  error_msg=NULL, updated_at=excluded.updated_at""",
             (video_id, title, description, original_path, uploader_id, now, now),
         )
@@ -461,3 +475,68 @@ async def apply_vote(user_id: str, comment_id: str, value: int) -> dict:
         r = await cur.fetchone()
         await db.commit()
         return {"like_count": r[0], "dislike_count": r[1], "score": r[2]}
+
+
+# ---- moderation ----
+
+
+async def set_moderation(video_id: str, status: str,
+                         reason: str | None) -> None:
+    async with aiosqlite.connect(config.db_path) as db:
+        await db.execute(
+            "UPDATE videos SET moderation_status=?, rejection_reason=?, "
+            "updated_at=? WHERE id=?",
+            (status, reason, time.time(), video_id),
+        )
+        await db.commit()
+
+
+async def resubmit_video(video_id: str, title: str, description: str) -> None:
+    async with aiosqlite.connect(config.db_path) as db:
+        await db.execute(
+            "UPDATE videos SET title=?, description=?, "
+            "moderation_status='pending_review', rejection_reason=NULL, "
+            "updated_at=? WHERE id=?",
+            (title, description, time.time(), video_id),
+        )
+        await db.commit()
+
+
+async def list_videos_public(limit: int = 50, offset: int = 0) -> list[dict]:
+    async with aiosqlite.connect(config.db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            _VIDEO_SELECT
+            + " WHERE v.status='ready' AND v.moderation_status='approved'"
+            + " ORDER BY v.created_at DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        )
+        return [dict(r) for r in await cursor.fetchall()]
+
+
+async def count_videos_public() -> int:
+    async with aiosqlite.connect(config.db_path) as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM videos "
+            "WHERE status='ready' AND moderation_status='approved'")
+        return (await cursor.fetchone())[0]
+
+
+async def list_moderation_queue(limit: int = 50, offset: int = 0) -> list[dict]:
+    async with aiosqlite.connect(config.db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            _VIDEO_SELECT
+            + " WHERE v.status='ready' AND v.moderation_status='pending_review'"
+            + " ORDER BY v.created_at ASC LIMIT ? OFFSET ?",
+            (limit, offset),
+        )
+        return [dict(r) for r in await cursor.fetchall()]
+
+
+async def count_moderation_queue() -> int:
+    async with aiosqlite.connect(config.db_path) as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM videos "
+            "WHERE status='ready' AND moderation_status='pending_review'")
+        return (await cursor.fetchone())[0]
