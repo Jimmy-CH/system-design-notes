@@ -109,9 +109,10 @@ bcrypt==4.2.0
     jwt_secret: str = os.getenv("JWT_SECRET", "dev-only-secret-change-in-production")
     access_token_ttl: int = int(os.getenv("ACCESS_TOKEN_TTL", "900"))       # 15min
     refresh_token_ttl: int = int(os.getenv("REFRESH_TOKEN_TTL", "604800"))  # 7d
+    ban_marker_ttl: int = int(os.getenv("BAN_MARKER_TTL", "86400"))         # 1d, see spec 2.5
 ```
 
-改完后 `Config` 的完整字段顺序应为：`db_path, original_dir, transcoded_dir, host, port, redis_url, task_queue, event_queue, presign_ttl, max_upload_bytes, allowed_exts, jwt_secret, access_token_ttl, refresh_token_ttl`。
+改完后 `Config` 的完整字段顺序应为：`db_path, original_dir, transcoded_dir, host, port, redis_url, task_queue, event_queue, presign_ttl, max_upload_bytes, allowed_exts, jwt_secret, access_token_ttl, refresh_token_ttl, ban_marker_ttl`。
 
 - [ ] **Step 3: 本地安装新依赖（供后续任务的临时校验脚本使用）**
 
@@ -566,6 +567,13 @@ def refresh_key(user_id: str, token: str) -> str:
 
 def refresh_prefix(user_id: str) -> str:
     return f"refresh:{user_id}:"
+
+
+def ban_key(user_id: str) -> str:
+    """Redis key marking a user as banned. get_current_user checks EXISTS on it
+    (one O(1) GET, no DB) so a ban revokes even a live access token immediately
+    (spec 2.5)."""
+    return f"auth:ban:{user_id}"
 ```
 
 - [ ] **Step 3: 语法检查**
@@ -942,6 +950,9 @@ async def ban(actor_id: str, target_id: str, reason: str = "") -> dict:
         raise NotFoundError("user not found")
     await database.set_user_status(target_id, "banned")
     revoked = await revoke_all_refresh(target_id)
+    # Immediate-revocation marker: get_current_user rejects any live access
+    # token once this key exists (spec 2.5).
+    await _redis.set(security.ban_key(target_id), "1", ex=config.ban_marker_ttl)
     logger.info("Banned user %s (reason=%r); revoked %d refresh tokens",
                 target_id, reason, revoked)
     return _user_out(await database.get_user_by_id(target_id))
@@ -951,6 +962,7 @@ async def unban(target_id: str) -> dict:
     if await database.get_user_by_id(target_id) is None:
         raise NotFoundError("user not found")
     await database.set_user_status(target_id, "active")
+    await _redis.delete(security.ban_key(target_id))
     logger.info("Unbanned user %s", target_id)
     return _user_out(await database.get_user_by_id(target_id))
 ```
@@ -1045,7 +1057,7 @@ if os.path.exists("data/_verify_svc.db"):
     os.remove("data/_verify_svc.db")
 
 from app import database  # noqa: E402
-from app.auth import service  # noqa: E402
+from app.auth import security, service  # noqa: E402
 
 
 class FakeRedis:
@@ -1136,19 +1148,24 @@ async def main():
     await expect(service.AuthError, service.refresh(pair3["refresh_token"]),
                  "refresh after logout")
 
-    # --- ban blocks login and refresh, but not a held access token ---
+    # --- ban revokes refresh tokens AND sets an immediate-revocation marker ---
     dave = await service.register("dave", "dave@t.local", "Passw0rd!")
     dp = await service.login("dave@t.local", "Passw0rd!")
     banned = await service.ban(admin["id"], dave["id"], "spam")
     assert banned["status"] == "banned"
-    assert fake.store == {}, "ban must revoke refresh tokens"
+    assert not [k for k in fake.store if k.startswith("refresh:")], \
+        "ban must revoke all refresh tokens"
+    assert security.ban_key(dave["id"]) in fake.store, \
+        "ban must set the auth:ban marker (get_current_user -> 403)"
     await expect(service.PermissionError,
                  service.login("dave@t.local", "Passw0rd!"), "banned login")
     me = await service.get_me(dave["id"])
-    assert me["status"] == "banned", "held access still resolves (spec 8.1 item 10)"
+    assert me["status"] == "banned"
     await expect(service.ValidationError,
                  service.ban(admin["id"], admin["id"]), "self ban")
     await service.unban(dave["id"])
+    assert security.ban_key(dave["id"]) not in fake.store, \
+        "unban must clear the auth:ban marker"
     assert (await service.get_me(dave["id"]))["status"] == "active"
 
     # --- roles ---
@@ -1226,12 +1243,22 @@ from app.auth.security import InvalidTokenError
 
 _bearer = HTTPBearer(auto_error=False)
 
+# Redis handle injected from the api-server lifespan (the SAME client passed to
+# service.bind_redis). get_current_user uses it for a single O(1) EXISTS check
+# of the ban marker (spec 2.5).
+_redis = None
+
+
+def bind_redis(client) -> None:
+    global _redis
+    _redis = client
+
 
 @dataclass
 class CurrentUser:
-    """Everything here comes from the JWT payload - no DB lookup. That is why
-    role changes and bans only take effect after the access token expires
-    (spec 2.5, <= access_token_ttl window)."""
+    """Fields come from the JWT payload - no DB lookup. A banned user is
+    rejected by get_current_user via a Redis marker (immediate, spec 2.5);
+    only *role changes* still wait for the access token to be refreshed."""
 
     id: str
     username: str
@@ -1258,6 +1285,11 @@ async def get_current_user(
     user = _parse(creds)
     if user is None:
         raise HTTPException(status_code=401, detail="not authenticated")
+    # One O(1) Redis EXISTS (no DB) makes a ban revoke even a live access token
+    # immediately (spec 2.5). Guard on _redis so the module imports cleanly in
+    # route-table checks that never bind a client.
+    if _redis is not None and await _redis.exists(security.ban_key(user.id)):
+        raise HTTPException(status_code=403, detail="account is banned")
     return user
 
 
@@ -1541,6 +1573,7 @@ from app import database
 from app import presign
 from app.auth import security
 from app.auth import service as auth_service
+from app.auth import dependencies as auth_deps
 from app.auth.dependencies import CurrentUser, get_current_user, require_role
 from app.auth.router import router as auth_router
 from app.completion_consumer import run_consumer
@@ -1557,9 +1590,10 @@ from app.queue import create_client, push_task
     await auth_service.ensure_seed_users()
     redis = create_client()
     auth_service.bind_redis(redis)
+    auth_deps.bind_redis(redis)
 ```
 
-（`ensure_seed_users` 必须在 `init_db` 之后——users 表要先存在；`bind_redis` 必须在 `create_client` 之后。）
+（`ensure_seed_users` 必须在 `init_db` 之后——users 表要先存在；`auth_service.bind_redis` 与 `auth_deps.bind_redis` 必须在 `create_client` 之后，两者共用同一个 client。）
 
 在 `app = FastAPI(...)` 那一行之后紧接着加：
 
@@ -1784,9 +1818,10 @@ Expected: `PRESIGN_VERIFY_OK`
       JWT_SECRET: "dev-only-secret-change-in-production"
       ACCESS_TOKEN_TTL: "900"
       REFRESH_TOKEN_TTL: "604800"
+      BAN_MARKER_TTL: "86400"
 ```
 
-改完后 `api-server.environment` 应为 7 个键：`REDIS_URL, DB_PATH, ORIGINAL_DIR, TRANSCODED_DIR, JWT_SECRET, ACCESS_TOKEN_TTL, REFRESH_TOKEN_TTL`。
+改完后 `api-server.environment` 应为 8 个键：`REDIS_URL, DB_PATH, ORIGINAL_DIR, TRANSCODED_DIR, JWT_SECRET, ACCESS_TOKEN_TTL, REFRESH_TOKEN_TTL, BAN_MARKER_TTL`。
 
 `transcoder-worker` / `cdn` / `frontend` / `redis` 四个服务**不需要任何改动**（worker 不参与认证，媒体仍公开）。
 
@@ -2209,9 +2244,9 @@ def main():
     check("banned user's refresh -> 401",
           requests.post(f"{API}/api/auth/refresh",
                         json={"refresh_token": dave_rt}).status_code == 401)
-    check("HELD access still works until expiry (known stateless window)",
+    check("HELD access immediately 403 (ban marker checked per request, spec 2.5)",
           requests.get(f"{API}/api/auth/me",
-                       headers=hdr(dave_access)).status_code == 200)
+                       headers=hdr(dave_access)).status_code == 403)
     r = requests.post(f"{API}/api/users/{dave_id}/unban", headers=hdr(admin_access))
     check("unban -> 200 with status active",
           r.status_code == 200 and r.json().get("status") == "active", r.text)
@@ -3696,7 +3731,7 @@ Expected: 输出含 `ACCESS_TOKEN_TTL: "900"`
 
 ```markdown
 - **用户系统与四级角色**：注册/登录，`user < creator < moderator < admin` 单向包含的权限层级
-- **双层令牌认证**：JWT access token（15min，本地验签不查库）+ 不透明 refresh token（Redis，7d，每次刷新轮换）
+- **双层令牌认证**：JWT access token（15min，本地验签 + 一次 Redis 封禁标记检查）+ 不透明 refresh token（Redis，7d，每次刷新轮换）
 - **重放防护**：提交已轮换掉的 refresh token 会吊销该用户全部会话并强制重新登录
 - **视频归属与管理后台**：视频记录上传者，`/my-videos` 管理自己的上传，`/admin/users` 改角色与封禁
 ```
@@ -3723,12 +3758,12 @@ app/auth/
 
 | 令牌 | 形态 | 客户端存储 | 服务端存储 | TTL | 校验方式 |
 |------|------|-----------|-----------|-----|----------|
-| access | JWT (HS256) | localStorage | 无 | 15min | 本地验签，不查库/Redis |
+| access | JWT (HS256) | localStorage | 无 | 15min | 本地验签不查库 + 1 次 Redis EXISTS 查封禁标记 |
 | refresh | `{user_id}.{随机串}` | localStorage | Redis 仅存 SHA-256 | 7d | 查 Redis + 查 users 表确认未封禁 |
 
 refresh token 每次使用即**轮换**（删旧键、写新键）。若提交的令牌在 Redis 中已不存在，视为重放攻击，吊销该用户全部会话并要求重新登录——这也是令牌必须内嵌 `user_id` 的原因：键不存在时无从反查归属。
 
-**无状态验签的已知代价**：角色变更与封禁无法即时中断已签发的 access token，最迟在 `ACCESS_TOKEN_TTL`（默认 15min）内完全生效。封禁的三层生效路径：登录时拒绝 → 封禁时立即吊销 refresh → 刷新时查库拒绝。
+**封禁即时生效**：`ban` 操作除吊销全部 refresh 外，还置一个用户级 Redis 标记 `auth:ban:{user_id}`（TTL=`BAN_MARKER_TTL`，默认 1d）；`get_current_user` 本地验签后做一次 O(1) `EXISTS` 命中即 403，因此**封禁对正在使用的 access token 也立即生效**（`unban` 删除该标记）。**角色变更**因签在 access payload 内，仍需重登/刷新才生效（≤15min）。
 
 **前端零循环依赖**：`tokens.js`（零依赖）← `api.js` ← `auth.js` ← `router.js`/视图；会话失效后的跳转由 `main.js` 注入回调，避免 `api.js` 反向依赖 router。
 ````
