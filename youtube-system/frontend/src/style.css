@@ -180,3 +180,121 @@ body {
   border-radius: 8px;
   font-size: 13px;
 }
+
+/* ---- Auth & identity (user system) ---- */
+.nav-actions { display: flex; align-items: center; gap: 12px; }
+
+.auth-page { max-width: 400px; margin: 48px auto 0; }
+.auth-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 28px;
+}
+.auth-card h2 { margin: 0 0 20px; font-size: 20px; }
+.auth-footer { margin-top: 16px; font-size: 13px; color: var(--text-dim); }
+.auth-footer a { color: var(--accent); text-decoration: none; }
+.auth-footer a:hover { text-decoration: underline; }
+
+.user-menu { position: relative; }
+.user-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 18px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text);
+  font-size: 14px;
+  cursor: pointer;
+}
+.user-btn:hover { background: var(--bg-hover); }
+.user-btn .caret { font-size: 10px; color: var(--text-dim); }
+
+.dropdown {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  min-width: 190px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  z-index: 20;
+}
+.dropdown-header {
+  padding: 8px 10px 10px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 6px;
+}
+.dropdown-header .name { font-size: 14px; font-weight: 600; }
+.dropdown-header .mail { font-size: 12px; color: var(--text-dim); }
+.dropdown-item {
+  display: block;
+  width: 100%;
+  padding: 9px 10px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--text);
+  font-size: 14px;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+}
+.dropdown-item:hover { background: var(--bg-hover); }
+
+.role-tag {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  background: #143d5c;
+  color: #64b5f6;
+}
+.role-tag.admin { background: #5c1f1f; color: #e57373; }
+.role-tag.moderator { background: #4a3a19; color: #ffd54f; }
+.role-tag.creator { background: #1b4a2a; color: #66bb6a; }
+
+.uploader { color: var(--text-dim); font-size: 12px; margin: 2px 0 0; }
+
+.hint-box {
+  background: #14303d;
+  border: 1px solid #1f4d63;
+  color: #8fd3f4;
+  padding: 12px 16px;
+  border-radius: 8px;
+  margin: 12px 0;
+  font-size: 13px;
+}
+
+/* Admin users table */
+.table-wrap { overflow-x: auto; }
+table.users {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+table.users th, table.users td {
+  text-align: left;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+table.users th { color: var(--text-dim); font-weight: 600; font-size: 12px; }
+table.users tr:hover td { background: var(--bg-card); }
+table.users select {
+  background: var(--bg-card);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 6px;
+}
+table.users .row-actions { display: flex; gap: 8px; align-items: center; }
+.btn.tiny { padding: 4px 10px; font-size: 12px; border-radius: 12px; }
+.btn.danger { background: #6b2020; }
+.btn.danger:hover { background: #8a2a2a; }
