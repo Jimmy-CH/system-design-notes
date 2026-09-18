@@ -32,6 +32,16 @@ async def process_video(task: dict, redis, resource_manager) -> None:
         shutil.rmtree(out_root, ignore_errors=True)
         os.makedirs(out_root, exist_ok=True)
 
+        # ---- DRM: prepare key_info.txt if an encryption key exists ----
+        keys_dir = os.getenv("KEYS_DIR", "data/keys")
+        key_file = os.path.join(keys_dir, f"{video_id}.key")
+        key_info_path = None
+        if os.path.exists(key_file):
+            key_info_path = os.path.join(out_root, "key_info.txt")
+            with open(key_info_path, "w", encoding="utf-8") as kf:
+                kf.write(f"/api/keys/{video_id}\n")
+                kf.write(f"{key_file}\n")
+
         # ---- Stage 0 event: metadata + rendition set ----
         await _push_event(redis, {
             "type": "processing",
@@ -49,7 +59,8 @@ async def process_video(task: dict, redis, resource_manager) -> None:
         encode_jobs = [
             resource_manager.submit(
                 f"{video_id}:{r['resolution']}",
-                task_worker.encode_rendition(src, out_root, r),
+                task_worker.encode_rendition(src, out_root, r,
+                                              key_info_path=key_info_path),
             )
             for r in renditions
         ]

@@ -25,7 +25,8 @@ def _run(cmd: list[str], timeout: int = 1800) -> None:
             f"command failed ({proc.returncode}): {proc.stderr.strip()[-300:]}")
 
 
-def _encode_once(src: str, out_root: str, rend: dict) -> None:
+def _encode_once(src: str, out_root: str, rend: dict,
+                 key_info_path: str | None = None) -> None:
     out_dir = os.path.join(out_root, rend["resolution"])
     os.makedirs(out_dir, exist_ok=True)
     playlist = os.path.join(out_dir, "playlist.m3u8")
@@ -39,18 +40,21 @@ def _encode_once(src: str, out_root: str, rend: dict) -> None:
         "-c:a", "aac", "-b:a", "128k",
         "-hls_time", "4", "-hls_playlist_type", "vod",
         "-hls_segment_filename", os.path.join(out_dir, "seg_%03d.ts"),
-        playlist,
     ]
+    if key_info_path:
+        cmd += ["-hls_key_info_file", key_info_path]
+    cmd.append(playlist)
     _run(cmd)
 
 
 async def encode_rendition(src: str, out_root: str, rend: dict,
+                           key_info_path: str | None = None,
                            max_retries: int = 3) -> dict:
     """Encode one rendition with retry/backoff. Returns the rendition result."""
     backoff = 2
     for attempt in range(1, max_retries + 1):
         try:
-            await asyncio.to_thread(_encode_once, src, out_root, rend)
+            await asyncio.to_thread(_encode_once, src, out_root, rend, key_info_path)
             return {
                 "resolution": rend["resolution"],
                 "playlist_path": f"{rend['resolution']}/playlist.m3u8",
