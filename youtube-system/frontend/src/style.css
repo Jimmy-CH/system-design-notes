@@ -166,7 +166,7 @@ body {
 .watch-layout { display: grid; grid-template-columns: 1fr 340px; gap: 24px; }
 @media (max-width: 960px) { .watch-layout { grid-template-columns: 1fr; } }
 
-.player-box { background: #000; border-radius: 12px; overflow: hidden; }
+.player-box { background: #000; border-radius: 12px; overflow: hidden; position: relative; }
 .player-box video { width: 100%; aspect-ratio: 16 / 9; display: block; }
 
 .quality-menu { position: relative; display: inline-block; }
@@ -353,3 +353,10 @@ table.users .row-actions { display: flex; gap: 8px; align-items: center; }
 .mod-reject-form input { flex: 1; padding: 6px 10px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text); }
 .mod-loading { color: var(--text-dim); }
 .mod-summary { color: var(--text-dim); font-size: 13px; margin-top: 12px; }
+
+/* ---------- DRM watermark ---------- */
+.watermark {
+  position: absolute; top: 8px; right: 12px;
+  color: rgba(255, 255, 255, 0.35); font-size: 12px;
+  pointer-events: none; z-index: 5; user-select: none;
+}

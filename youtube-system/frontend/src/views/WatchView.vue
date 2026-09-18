@@ -4,7 +4,7 @@ import { useRoute } from 'vue-router'
 import Hls from 'hls.js'
 import Comments from '../components/Comments.vue'
 import { extractError, getVideo, retryVideo } from '../api'
-import { authState, hasRole } from '../auth'
+import { authState, getAccess, hasRole } from '../auth'
 
 const route = useRoute()
 const video = ref(null)
@@ -50,7 +50,14 @@ function play(url) {
   const el = videoEl.value
   if (!el) return
   if (Hls.isSupported()) {
-    const hls = new Hls()
+    const hls = new Hls({
+      xhrSetup: (xhr, reqUrl) => {
+        if (reqUrl.includes('/api/keys/')) {
+          const token = getAccess()
+          if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token)
+        }
+      }
+    })
     hlsPlayer.value = hls
     hls.loadSource(url)
     hls.attachMedia(el)
@@ -59,7 +66,7 @@ function play(url) {
       hls.currentLevel = -1 // auto by default
     })
   } else if (el.canPlayType('application/vnd.apple.mpegurl')) {
-    el.src = url // Safari native HLS
+    el.src = url // Safari native HLS (no custom key auth)
   }
 }
 
@@ -94,6 +101,7 @@ onUnmounted(() => {
       <div>
         <div class="player-box">
           <video ref="videoEl" controls></video>
+          <div v-if="authState.user" class="watermark">{{ authState.user.username }}</div>
         </div>
         <div v-if="video.moderation_status === 'pending_review'" class="badge pending_review moderation-banner">
           Under review – only you (owner) and moderators can see this page
