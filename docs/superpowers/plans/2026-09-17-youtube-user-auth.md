@@ -1106,7 +1106,9 @@ async def main():
     assert admin["role"] == "admin" and admin["status"] == "active"
 
     # --- register ---
-    u = await service.register("alice", "Alice@T.local", "Passw0rd!")
+    # register receives an already-normalized email: the router validates via
+    # RegisterRequest (which lowercases) before delegating here (see schemas).
+    u = await service.register("alice", "alice@t.local", "Passw0rd!")
     assert u["role"] == "user" and u["email"] == "alice@t.local", u
     assert "password_hash" not in u and "password" not in u, u
     await expect(service.ConflictError,
