@@ -103,10 +103,11 @@ async def list_videos_by_uploader(uploader_id) -> list[dict]
 | `jwt_secret` | `JWT_SECRET` | `"dev-only-secret-change-in-production"` |
 | `access_token_ttl` | `ACCESS_TOKEN_TTL` | `900`（15min） |
 | `refresh_token_ttl` | `REFRESH_TOKEN_TTL` | `604800`（7d） |
+| `ban_marker_ttl` | `BAN_MARKER_TTL` | `86400`（1d，封禁标记存活，见 2.5） |
 
-验证纯本地完成，**不查 Redis 也不查库**——这是无状态的核心收益，api-server 可水平扩展。
+验签纯本地完成（**不查数据库**）；`get_current_user` 仅额外做一次 **Redis GET 检查封禁标记** `auth:ban:{user_id}`（见 2.5）。这样既保留「无 DB 查询、api-server 可水平扩展」的收益，又让封禁即时生效。
 
-代价：角色变更与封禁在 access token 剩余有效期内（≤15min）仍会放行，属可接受窗口（见 2.5）。
+代价：**角色变更**（新 role 签在新 access 里）在旧 access 剩余有效期内（≤15min）不生效，需重新登录/刷新拿到新 role。封禁则通过 Redis 标记即时生效（见 2.5）。
 
 ### 2.2 Refresh token（不透明随机串，Redis）
 
@@ -129,17 +130,18 @@ TTL：   config.refresh_token_ttl（默认 604800）
 
 ### 2.4 登出
 
-`POST /api/auth/logout` SCAN 删除该用户全部 refresh 键，返回 204。access token 不主动失效（不引入黑名单），靠 `access_token_ttl`（默认 15min）短 TTL 自然过期。
+`auth:ban:{user_id}` 是**用户级封禁标记**（见 2.5），与登出无关。**登出仅吊销 refresh**：SCAN 删除该用户全部 refresh 键，返回 204。登出者自己设备上的 access token 不主动失效（前端随即清除本地令牌），靠 `access_token_ttl`（默认 15min）自然过期。
 
-### 2.5 封禁生效路径
+### 2.5 封禁即时生效（Redis 封禁标记）
 
-access token 采用本地验签、不查库，因此**封禁无法即时中断已签发的 access token**。生效路径分三层：
+因 access token 本地验签、角色与 id 均签在令牌内，若不做额外处理，封禁只能等 access 过期（≤15min）才生效。为满足「封禁/登出即时吊销」的诉求，引入**用户级封禁标记**：
 
-1. **登录时**：检查 `status`，`banned` → 403 "account is banned"
-2. **封禁操作时**：admin 调 `/ban` 立即 SCAN 删除该用户全部 refresh 键 → 用户无法再续期
-3. **刷新时**：`/api/auth/refresh` 除校验 Redis 键外，**额外查一次 users 表确认 `status == 'active'`**，否则吊销并返回 401 "account is banned"
+- `ban` 操作：置 `auth:ban:{user_id} = 1`（TTL 取 `max(access_token_ttl, 剩余风险窗口)`，默认 `86400`/1 天，由 `BAN_MARKER_TTL` 配置）+ SCAN 删除该用户全部 `refresh:*` 键。
+- `get_current_user`：本地验签通过后，做一次 `EXISTS auth:ban:{user_id}`；命中则 403 "account is banned"。这是**单次 Redis O(1) GET**，不查数据库，水平扩展不受影响。
+- `unban`：删除 `auth:ban:{user_id}`，用户凭有效 refresh 即可恢复（access 过期后重新登录）。
+- 登录：检查 `users.status`，`banned` → 403。
 
-综合效果：封禁后最迟 `access_token_ttl`（默认 15min）内完全生效。这是无状态验签的已知代价，`get_current_user` **不检查 status**——JWT payload 中没有该字段，且检查就必须查库，会破坏无状态收益。
+综合效果：**封禁对正在使用中的 access 也立即生效**（下一次请求即被 Redis 标记拦截）。`get_current_user` **不查 users 表**（避免每请求 DB 读），角色变更仍需重登生效（见 2.1）。
 
 ### 2.6 新增依赖
 
@@ -179,7 +181,7 @@ class CurrentUser:
 
 async def get_current_user(creds = Depends(HTTPBearer(auto_error=False))) -> CurrentUser
     # 缺失/无效/过期/签名错误 → 401；payload type != "access" → 401
-    # 不查库、不检查 status（见 2.5 封禁生效路径）
+    # 本地验签后做一次 Redis GET 检查 auth:ban:{user_id}（见 2.5），命中则 403；不查数据库
 
 async def get_optional_user(creds = Depends(HTTPBearer(auto_error=False))) -> CurrentUser | None
     # 公开端点用：有 token 就解析，无 token 或无效均返回 None，不报错
@@ -355,7 +357,7 @@ export function hasRole(minRole): boolean
 ```
 浏览器 ──Authorization: Bearer <access>──▶ api-server
                                             │ HTTPBearer 提取
-                                            │ jwt.decode（本地验签，不查库/Redis）
+                                            │ jwt.decode（本地验签）→ EXISTS auth:ban:{uid}
                                             ▼
                                       CurrentUser{id, username, role}
                                             │ require_role(min) 等级比较
@@ -384,6 +386,7 @@ export function hasRole(minRole): boolean
 JWT_SECRET: "dev-only-secret-change-in-production"
 ACCESS_TOKEN_TTL: "900"
 REFRESH_TOKEN_TTL: "604800"
+BAN_MARKER_TTL: "86400"
 ```
 
 `app/config.py` 新增对应字段（见 2.1 表格）。worker 容器无需变更（不参与认证）。CDN 容器无需变更（媒体仍公开可访问，DRM 留待第四轮）。前端 nginx 反代无需变更（`/api/` 已全量代理）。
@@ -405,7 +408,7 @@ REFRESH_TOKEN_TTL: "604800"
 7. 用 A 的 video_id 以 B 的身份调 `POST /api/videos` → 403（预签名归属校验生效）
 8. `POST /api/auth/refresh` → 新令牌对；用**旧** refresh 再次刷新 → 401，且刚拿到的新令牌也被吊销（重放防护生效）
 9. `POST /api/auth/logout` → 204；此后 refresh → 401
-10. admin 封禁该用户 → 其登录 403；其 refresh 立即 401；**已持有的 access 在过期前调 `/me` 仍返回 200**（无状态验签的已知窗口，断言此实际行为而非 403）
+10. admin 封禁该用户 → 其登录 403；其 refresh 立即 401；**已持有的 access 调 `/me` 立即返回 403**（get_current_user 命中 Redis 封禁标记，封禁即时生效）；admin 解封后重新登录 → 200
 11. 权限矩阵（4.5 表格）逐格验证
 12. admin 改自己角色 → 400；admin 封自己 → 400；`PATCH role` 传非法值（如 `"superuser"`）→ 400
 
@@ -434,4 +437,4 @@ REFRESH_TOKEN_TTL: "604800"
 - 视频可见性（public/unlisted/private）
 - 用户头像上传、个人资料编辑
 - 媒体访问鉴权（CDN 仍公开，属第四轮 DRM 范围）
-- access token 黑名单（靠短 TTL 自然过期）
+- access token 逐个拉黑（仅用用户级 `auth:ban` 标记实现封禁即时生效；登出场景仍靠短 TTL 自然过期）
