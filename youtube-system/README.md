@@ -16,6 +16,9 @@
 - **双层令牌认证**：JWT access token（15min，本地验签 + 一次 Redis 封禁标记检查）+ 不透明 refresh token（Redis，7d，每次刷新轮换）
 - **重放防护**：提交已轮换掉的 refresh token 会吊销该用户全部会话并强制重新登录
 - **视频归属与管理后台**：视频记录上传者，`/my-videos` 管理自己的上传，`/admin/users` 改角色与封禁
+- **评论与 1 级回复**：视频下评论、回复归入同一顶级线程；读公开、登录可写
+- **评论赞/踩**：每人每评论一票，可切换/取消，反范式净分用于热度排序
+- **评论治理**：作者软删除自己评论（留占位），moderator/admin 可删任意
 
 ## 架构
 
@@ -175,6 +178,18 @@ docker compose up -d --scale transcoder-worker=3
 
 权限变化：`POST /api/upload-url` 与 `POST /api/videos` 现需 **creator+**；`POST /api/videos/{id}/retry` 需登录且为本人或 **moderator+**；`GET /api/stats` 收紧为 **moderator+**。`POST /api/upload/{token}` 仍不带 JWT——预签名 token 本身即凭证，归属校验推迟到 `POST /api/videos`。
 
+### 评论与点赞
+
+| 方法 | 路径 | 权限 | 说明 |
+|------|------|------|------|
+| GET | `/api/videos/{video_id}/comments` | 公开 | 顶级评论分页，`?sort=top\|new&limit&offset`；登录附 `my_vote` |
+| GET | `/api/comments/{id}/replies` | 公开 | 该线程回复，时间正序分页 |
+| POST | `/api/videos/{video_id}/comments` | 登录 | body `{content, reply_to?}` 建评论/回复 |
+| DELETE | `/api/comments/{id}` | 作者或 moderator+ | 软删除，204 |
+| PUT | `/api/comments/{id}/vote` | 登录 | body `{value: 1\|-1\|0}`，0 撤票 |
+
+投票计数走 `comments` 冗余列（`like_count/dislike_count/score`）+ `comment_votes(user_id, comment_id, value)` 主键唯一，`apply_vote` 单事务更新。模块位于 `app/comments/`（`schemas/service/router`），复用 `app/auth/dependencies` 的鉴权与 `ROLE_LEVEL`。
+
 ## 设计要点（对照设计文档）
 
 1. **并行上传**：设计文档要求元数据与二进制走不同服务并行处理；本实现元数据在二进制落盘后注册（保证 `create_video` 校验二进制存在），时序上简化为顺序但接口边界保持分离。
@@ -188,6 +203,10 @@ docker compose up -d --scale transcoder-worker=3
 9. **历史数据兼容**：`videos.uploader_id` 可空，用户系统上线前的视频显示为 Anonymous 且照常播放；迁移用 `PRAGMA table_info` 探测后再 `ALTER TABLE`，可重复执行。
 10. **预签名归属校验**：`presign.claim_owner()` 一次性消费 `video_id → user_id` 映射，防止冒名注册他人上传的视频。
 11. **角色层级前后端各一份**：后端 `app/auth/security.py` 的 `ROLE_LEVEL` 与前端 `src/auth.js` 的 `ROLE_LEVEL` 必须保持一致。
+12. **评论读公开、写需登录**：列表/回复用 `get_optional_user`，登录才注入 `my_vote`；发表/投票用 `get_current_user`。
+13. **1 级线程靠 root_id 归位**：回复的回复不新增层级，`root_id` 恒指向顶级评论，`parent_id` 记录“回复谁”。
+14. **软删除保线程**：删除仅置 `status=deleted` 并屏蔽正文，回复链不断裂。
+15. **反范式计数**：单写者事务内同步 `comment_votes` 与 `comments` 计数，排序走索引列，热读高效。
 
 ## 技术栈
 
