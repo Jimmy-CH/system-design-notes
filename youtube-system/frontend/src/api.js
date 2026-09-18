@@ -150,3 +150,24 @@ export function retryVideo(id) {
 export function getStats() {
   return http.get('/api/stats')
 }
+
+// ---- comments & votes ----
+export function listComments(videoId, { sort = 'top', limit = 20, offset = 0 } = {}) {
+  return http.get(`/api/videos/${videoId}/comments`, { params: { sort, limit, offset } })
+}
+
+export function listReplies(commentId, { limit = 20, offset = 0 } = {}) {
+  return http.get(`/api/comments/${commentId}/replies`, { params: { limit, offset } })
+}
+
+export function createComment(videoId, content, replyTo = null) {
+  return http.post(`/api/videos/${videoId}/comments`, { content, reply_to: replyTo })
+}
+
+export function deleteComment(commentId) {
+  return http.delete(`/api/comments/${commentId}`)
+}
+
+export function voteComment(commentId, value) {
+  return http.put(`/api/comments/${commentId}/vote`, { value })
+}
