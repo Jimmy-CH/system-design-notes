@@ -711,8 +711,8 @@ async def main():
     assert (r["like_count"], r["dislike_count"], r["score"]) == (1, 1, 0), r
     r = await service.vote(cid, "u1", -1)  # alice switches to dislike
     assert (r["like_count"], r["dislike_count"], r["score"]) == (0, 2, -2), r
-    r = await service.vote(cid, "u1", 0)   # cancel
-    assert (r["like_count"], r["dislike_count"], r["my_vote"]) == (0, 2, 0), r
+    r = await service.vote(cid, "u1", 0)   # cancel (u1's dislike removed; u2's remains)
+    assert (r["like_count"], r["dislike_count"], r["my_vote"]) == (0, 1, 0), r
 
     # invalid value and voting a deleted comment
     try:
