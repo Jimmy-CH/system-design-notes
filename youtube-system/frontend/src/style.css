@@ -298,3 +298,43 @@ table.users .row-actions { display: flex; gap: 8px; align-items: center; }
 .btn.tiny { padding: 4px 10px; font-size: 12px; border-radius: 12px; }
 .btn.danger { background: #6b2020; }
 .btn.danger:hover { background: #8a2a2a; }
+
+/* ---- Comments & votes ---- */
+.comments { margin-top: 28px; border-top: 1px solid var(--border); padding-top: 20px; }
+.comments h3 { margin: 0 0 16px; font-size: 18px; }
+.comments h3 small { color: var(--text-dim); font-weight: 400; }
+
+.comment-form { margin-bottom: 16px; }
+.comment-form textarea {
+  width: 100%; padding: 10px 12px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--bg-card); color: var(--text);
+  font-size: 14px; resize: vertical; min-height: 60px;
+}
+.comment-form-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+.reply-form { margin: 10px 0; }
+
+.comment-sort { display: flex; gap: 16px; margin-bottom: 14px; }
+.comment-sort button {
+  background: none; border: none; color: var(--text-dim);
+  font-size: 14px; font-weight: 600; cursor: pointer; padding: 4px 0;
+}
+.comment-sort button.active { color: var(--text); border-bottom: 2px solid var(--accent); }
+
+.comment { padding: 12px 0; border-bottom: 1px solid var(--border); }
+.comment-head { display: flex; align-items: baseline; gap: 8px; }
+.comment-author { font-size: 13px; font-weight: 600; }
+.comment-date { font-size: 12px; color: var(--text-dim); }
+.comment-body { margin: 6px 0; font-size: 14px; line-height: 1.4; white-space: pre-wrap; }
+.comment-body.deleted { color: var(--text-dim); font-style: italic; }
+
+.comment-actions { display: flex; align-items: center; gap: 14px; }
+.vote { background: none; border: none; color: var(--text-dim); font-size: 13px; cursor: pointer; }
+.vote:hover { color: var(--text); }
+.vote.on { color: var(--accent); font-weight: 700; }
+.vote:disabled { opacity: 0.5; cursor: not-allowed; }
+.link { background: none; border: none; color: var(--text-dim); font-size: 13px; cursor: pointer; padding: 0; }
+.link:hover { color: var(--text); }
+.link.danger:hover { color: var(--accent); }
+
+.replies { margin-left: 24px; border-left: 2px solid var(--border); padding-left: 12px; }
+.comments-empty { color: var(--text-dim); font-size: 13px; padding: 8px 0; }

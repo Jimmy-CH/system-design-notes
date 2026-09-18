@@ -2,6 +2,7 @@
 import { computed, ref, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import Hls from 'hls.js'
+import Comments from '../components/Comments.vue'
 import { extractError, getVideo, retryVideo } from '../api'
 import { authState, hasRole } from '../auth'
 
@@ -125,6 +126,8 @@ onUnmounted(() => {
             </option>
           </select>
         </div>
+
+        <Comments :video-id="route.params.id" />
       </div>
 
       <aside>
