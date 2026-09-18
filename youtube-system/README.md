@@ -20,6 +20,7 @@
 - **评论赞/踩**：每人每评论一票，可切换/取消，反范式净分用于热度排序
 - **评论治理**：作者软删除自己评论（留占位），moderator/admin 可删任意
 - **视频内容审核** — 先审后发（moderator+ 审核队列 approve/reject）；拒绝可编辑后重新提交，不重转码
+- **视频 DRM**：新视频转码时 AES-128 加密 HLS 分片，密钥经 `/api/keys/{video_id}` 鉴权端点分发（需登录 + 视频已通过审核），前端叠加半透明水印（用户名）用于溯源。存量视频不受影响
 
 ## 架构
 
@@ -94,7 +95,8 @@ youtube-system/
 │   ├── presign.py           # 预签名 token（单次使用/TTL 300s）
 │   ├── queue.py             # Redis 队列助手
 │   ├── completion_consumer.py  # 事件消费 → 状态回写
-│   └── server.py            # FastAPI 7 端点
+│   ├── drm.py              # DRM 密钥生成 + GET /api/keys/{id}
+│   └── server.py            # FastAPI 7+ 端点
 ├── worker/                  # 转码 Worker（可多实例）
 │   ├── config.py
 │   ├── preprocessor.py      # ffprobe + 档位选择
@@ -200,6 +202,12 @@ docker compose up -d --scale transcoder-worker=3
 | POST | `/api/moderation/{id}/reject` | moderator+ | 拒绝 `{reason}` → 204 |
 | POST | `/api/videos/{id}/resubmit` | owner | 重新提交 `{title,description}` → 204 |
 
+### DRM 密钥分发
+
+| 方法 | 路径 | 权限 | 说明 |
+|------|------|------|------|
+| GET | `/api/keys/{video_id}` | Bearer token | 返回 16-byte AES-128 内容密钥（Cache-Control: no-store）。需已登录 + 视频 approved+ready。未加密视频返回 404。 |
+
 ## 设计要点（对照设计文档）
 
 1. **并行上传**：设计文档要求元数据与二进制走不同服务并行处理；本实现元数据在二进制落盘后注册（保证 `create_video` 校验二进制存在），时序上简化为顺序但接口边界保持分离。
@@ -220,6 +228,9 @@ docker compose up -d --scale transcoder-worker=3
 16. **Moderation status is orthogonal to transcode status** — `moderation_status` (pending_review/approved/rejected) is independent from `status` (pending/processing/ready/failed); a video is publicly visible only when `status='ready' AND moderation_status='approved'`.
 17. **Visibility gate at API level, not CDN** — non-approved videos return 404; since video IDs are random hex, the CDN path is not guessable. True CDN-level auth is deferred to the DRM module.
 18. **FIFO review queue** — videos enter moderation after transcode completes, oldest first; rejected videos re-enter queue via resubmit (no re-transcode).
+19. **创建时生成密钥**：`POST /api/videos` 在 `insert_video` 后、`push_task` 前调用 `drm.generate_key`，确保 worker 拾取任务时 key file 已就位。密钥存储在 `data/keys/` 目录（api-server 和 worker 共享 volume，CDN 不挂载）。
+20. **向后兼容**：存量视频无 key file → worker 不加密 → playlist 无 EXT-X-KEY → hls.js 正常播放明文路径。key endpoint 返回 404 不报错。
+21. **hls.js xhrSetup 注入 Bearer**：播放器 fetch `/api/keys/...` 时自动附带 Authorization header，复用前端 token store（`getAccess()`）。Safari 原生 HLS 不支持此方式（已知限制）。
 
 ## 技术栈
 
